@@ -870,7 +870,8 @@ fun SettingsScreen(
         onDismiss = { viewModel.dismissUpdateState() },
         onStartDownload = { info -> viewModel.downloadUpdate(info) },
         onCancelDownload = { viewModel.cancelDownload() },
-        onSkipVersion = { versionCode -> viewModel.skipVersion(versionCode) },
+        onSkipVersion = { versionName -> viewModel.skipVersion(versionName) },
+        onRemindLater = { viewModel.remindMeLater() },
         onRetry = { viewModel.checkForUpdates() },
         currentVersionName = aboutInfo.versionName
     )

@@ -5,5 +5,7 @@ data class GallerySettings(
     val essentialAlbumNames: Set<String> = emptySet(),
     val mergeAlbums: Boolean = false,
     val lastUpdateCheckMillis: Long = 0L,
-    val skippedVersionCode: Long = 0L
+    val skippedVersionCode: Long = 0L,
+    val skippedVersionName: String = "",
+    val remindLaterTimestampMillis: Long = 0L
 )

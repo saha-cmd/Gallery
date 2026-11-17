@@ -163,9 +163,21 @@ class SettingsViewModel @Inject constructor(
         appUpdateRepository.cancelDownload()
     }
 
+    fun skipVersion(versionName: String) {
+        viewModelScope.launch {
+            appUpdateRepository.skipVersion(versionName)
+        }
+    }
+
     fun skipVersion(versionCode: Long) {
         viewModelScope.launch {
             appUpdateRepository.skipVersion(versionCode)
+        }
+    }
+
+    fun remindMeLater() {
+        viewModelScope.launch {
+            appUpdateRepository.remindMeLater()
         }
     }
 

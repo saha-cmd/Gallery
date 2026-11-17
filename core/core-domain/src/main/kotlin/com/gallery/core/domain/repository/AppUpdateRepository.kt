@@ -9,6 +9,8 @@ interface AppUpdateRepository {
     suspend fun checkForUpdates(isManual: Boolean = false)
     suspend fun downloadUpdate(info: AppUpdateInfo)
     fun cancelDownload()
+    suspend fun skipVersion(versionName: String)
     suspend fun skipVersion(versionCode: Long)
+    suspend fun remindMeLater()
     fun dismissUpdateState()
 }

@@ -3,10 +3,10 @@ package com.gallery.core.data.repository
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.core.content.pm.PackageInfoCompat
 import com.gallery.core.data.updater.UpdateConfig
 import com.gallery.core.domain.model.AppUpdateInfo
 import com.gallery.core.domain.model.AppUpdateState
+import com.gallery.core.domain.model.GallerySettings
 import com.gallery.core.domain.repository.AppUpdateRepository
 import com.gallery.core.domain.repository.SettingsRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -28,6 +28,7 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -48,15 +49,6 @@ class AppUpdateRepositoryImpl @Inject constructor(
         val currentState = _updateState.value
         if (currentState is AppUpdateState.Checking || currentState is AppUpdateState.Downloading) {
             return
-        }
-
-        // Silent background check rate-limiting: max once per 24 hours
-        val now = System.currentTimeMillis()
-        if (!isManual) {
-            val settings = settingsRepository.settings.first()
-            if (now - settings.lastUpdateCheckMillis < 24 * 60 * 60 * 1000L) {
-                return
-            }
         }
 
         if (isManual) {
@@ -88,8 +80,8 @@ class AppUpdateRepositoryImpl @Inject constructor(
                     )
                 }
 
-                // Update last checked timestamp
-                settingsRepository.setLastUpdateCheckMillis(System.currentTimeMillis())
+                val now = System.currentTimeMillis()
+                settingsRepository.setLastUpdateCheckMillis(now)
 
                 if (updateInfo == null) {
                     if (isManual) {
@@ -102,7 +94,7 @@ class AppUpdateRepositoryImpl @Inject constructor(
 
                 currentUpdateInfo = updateInfo
 
-                // Retrieve current app version
+                // Retrieve current app version name
                 val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     context.packageManager.getPackageInfo(
                         context.packageName,
@@ -112,23 +104,22 @@ class AppUpdateRepositoryImpl @Inject constructor(
                     @Suppress("DEPRECATION")
                     context.packageManager.getPackageInfo(context.packageName, 0)
                 }
-                val currentVersionCode = PackageInfoCompat.getLongVersionCode(packageInfo)
                 val currentVersionName = packageInfo.versionName ?: "1.0.0"
 
                 val isNewer = isNewerVersion(
-                    remoteVersionCode = updateInfo.versionCode,
-                    remoteVersionName = updateInfo.versionName,
-                    installedVersionCode = currentVersionCode,
-                    installedVersionName = currentVersionName
+                    remote = updateInfo.versionName,
+                    local = currentVersionName
                 )
 
                 if (isNewer) {
-                    val skippedCode = settingsRepository.settings.first().skippedVersionCode
-                    if (!isManual && updateInfo.versionCode > 0 && updateInfo.versionCode <= skippedCode) {
-                        _updateState.value = AppUpdateState.Idle
-                    } else {
-                        _updateState.value = AppUpdateState.UpdateAvailable(updateInfo)
+                    if (!isManual) {
+                        val settings = settingsRepository.settings.first()
+                        if (shouldSuppressUpdateOnBoot(updateInfo, settings, now)) {
+                            _updateState.value = AppUpdateState.Idle
+                            return@withContext
+                        }
                     }
+                    _updateState.value = AppUpdateState.UpdateAvailable(updateInfo)
                 } else {
                     if (isManual) {
                         _updateState.value = AppUpdateState.UpToDate
@@ -148,14 +139,57 @@ class AppUpdateRepositoryImpl @Inject constructor(
         }
     }
 
+    private fun shouldSuppressUpdateOnBoot(
+        info: AppUpdateInfo,
+        settings: GallerySettings,
+        nowMillis: Long
+    ): Boolean {
+        // 1. Skipped version rule:
+        // Suppress until a strictly newer version than skippedVersionName is published
+        if (settings.skippedVersionName.isNotBlank()) {
+            val isNewerThanSkipped = isNewerVersion(
+                remote = info.versionName,
+                local = settings.skippedVersionName
+            )
+            if (!isNewerThanSkipped) {
+                return true
+            }
+        }
+
+        // Backward compatibility check for numeric skippedVersionCode
+        if (settings.skippedVersionCode > 0L && info.versionCode > 0L && info.versionCode <= settings.skippedVersionCode) {
+            return true
+        }
+
+        // 2. Remind me later (24-hour snooze) rule:
+        if (settings.remindLaterTimestampMillis > 0L) {
+            val elapsed = nowMillis - settings.remindLaterTimestampMillis
+            val twentyFourHours = 24 * 60 * 60 * 1000L
+            if (elapsed in 0 until twentyFourHours) {
+                // If a strictly newer release was published AFTER snooze was set, do not suppress
+                val publishedMillis = runCatching {
+                    if (info.publishedAt.isNotBlank()) {
+                        Instant.parse(info.publishedAt).toEpochMilli()
+                    } else 0L
+                }.getOrDefault(0L)
+
+                if (publishedMillis <= settings.remindLaterTimestampMillis) {
+                    return true
+                }
+            }
+        }
+
+        return false
+    }
+
     override suspend fun downloadUpdate(info: AppUpdateInfo) {
         cancelDownload()
         currentUpdateInfo = info
 
         downloadJob = repositoryScope.launch {
             val updatesDir = File(context.cacheDir, "updates")
-            val tempFile = File(updatesDir, "gallery-v${info.versionName}.apk.tmp")
-            val targetFile = File(updatesDir, "gallery-v${info.versionName}.apk")
+            val targetFile = File(updatesDir, "Gallery-v${info.versionName}-signed.apk")
+            val tempFile = File(updatesDir, "Gallery-v${info.versionName}-signed.apk.tmp")
 
             try {
                 // Clean up stale files before beginning
@@ -179,7 +213,7 @@ class AppUpdateRepositoryImpl @Inject constructor(
                         connectTimeout = 15000
                         readTimeout = 15000
                         instanceFollowRedirects = true
-                        setRequestProperty("User-Agent", "Gallery-Android-App")
+                        setRequestProperty("User-Agent", "Gallery-Android-Updater")
                         setRequestProperty("Accept", "*/*")
                     }
                     val status = conn.responseCode
@@ -286,8 +320,18 @@ class AppUpdateRepositoryImpl @Inject constructor(
         }
     }
 
+    override suspend fun skipVersion(versionName: String) {
+        settingsRepository.setSkippedVersion(versionName)
+        _updateState.value = AppUpdateState.Idle
+    }
+
     override suspend fun skipVersion(versionCode: Long) {
         settingsRepository.setSkippedVersionCode(versionCode)
+        _updateState.value = AppUpdateState.Idle
+    }
+
+    override suspend fun remindMeLater() {
+        settingsRepository.setRemindLaterTimestamp(System.currentTimeMillis())
         _updateState.value = AppUpdateState.Idle
     }
 
@@ -310,7 +354,7 @@ class AppUpdateRepositoryImpl @Inject constructor(
             connectTimeout = 15000
             readTimeout = 15000
             setRequestProperty("Accept", "application/json")
-            setRequestProperty("User-Agent", "Gallery-Android-App")
+            setRequestProperty("User-Agent", "Gallery-Android-Updater")
             instanceFollowRedirects = true
         }
 
@@ -327,9 +371,7 @@ class AppUpdateRepositoryImpl @Inject constructor(
             if (apkUrl.isBlank()) return null
 
             val versionName = root.optString("versionName", "1.0.0")
-            val versionCode = root.optLong("versionCode", 0L).let { code ->
-                if (code > 0L) code else parseVersionCodeFromVersionName(versionName)
-            }
+            val versionCode = root.optLong("versionCode", 0L)
 
             AppUpdateInfo(
                 versionCode = versionCode,
@@ -351,7 +393,7 @@ class AppUpdateRepositoryImpl @Inject constructor(
             connectTimeout = 15000
             readTimeout = 15000
             setRequestProperty("Accept", "application/vnd.github+json")
-            setRequestProperty("User-Agent", "Gallery-Android-App")
+            setRequestProperty("User-Agent", "Gallery-Android-Updater")
             instanceFollowRedirects = true
         }
 
@@ -367,7 +409,7 @@ class AppUpdateRepositoryImpl @Inject constructor(
             val releaseNotes = root.optString("body", "Bug fixes and improvements.")
             val publishedAt = root.optString("published_at", "")
 
-            // Locate APK asset in release
+            // Locate APK asset in release (prioritize signed release APK, or any .apk)
             val assets = root.optJSONArray("assets") ?: return null
             var apkDownloadUrl = ""
             var fileSizeBytes = 0L
@@ -376,19 +418,21 @@ class AppUpdateRepositoryImpl @Inject constructor(
                 val asset = assets.getJSONObject(i)
                 val assetName = asset.optString("name", "")
                 if (assetName.endsWith(".apk", ignoreCase = true)) {
-                    apkDownloadUrl = asset.optString("browser_download_url", "")
-                    fileSizeBytes = asset.optLong("size", 0L)
-                    break
+                    if (assetName.contains("signed", ignoreCase = true) || apkDownloadUrl.isBlank()) {
+                        apkDownloadUrl = asset.optString("browser_download_url", "")
+                        fileSizeBytes = asset.optLong("size", 0L)
+                        if (assetName.contains("signed", ignoreCase = true)) {
+                            break
+                        }
+                    }
                 }
             }
 
             if (apkDownloadUrl.isBlank()) return null
 
-            // Derive versionCode: check release body for "versionCode: X", or calculate from tag
             val versionCodeRegex = Regex("""(?i)versionCode[\s:=]+(\d+)""")
             val matchedCode = versionCodeRegex.find(releaseNotes)?.groupValues?.get(1)?.toLongOrNull()
-            val derivedCode = matchedCode
-                ?: parseVersionCodeFromVersionName(rawVersionName)
+            val derivedCode = matchedCode ?: 0L
 
             AppUpdateInfo(
                 versionCode = derivedCode,
@@ -403,45 +447,30 @@ class AppUpdateRepositoryImpl @Inject constructor(
         }
     }
 
-    private fun parseVersionCodeFromVersionName(versionName: String): Long {
-        return try {
-            val parts = versionName.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }
-            if (parts.isEmpty()) return 1L
-            val major = parts.getOrNull(0)?.toLongOrNull() ?: 1L
-            val minor = parts.getOrNull(1)?.toLongOrNull() ?: 0L
-            val patch = parts.getOrNull(2)?.toLongOrNull() ?: 0L
-            major * 10000L + minor * 100L + patch
-        } catch (_: Exception) {
-            1L
+    /**
+     * Semantic version comparator.
+     * Strips leading 'v'/'V' and any metadata suffix after '-' (e.g., -beta, -signed).
+     * Compares numeric components segment-by-segment.
+     */
+    fun isNewerVersion(remote: String, local: String): Boolean {
+        val rClean = remote.trim().removePrefix("v").removePrefix("V")
+        val lClean = local.trim().removePrefix("v").removePrefix("V")
+
+        val rParts = rClean.substringBefore("-").split(".").mapNotNull { part ->
+            part.filter { it.isDigit() }.toIntOrNull()
         }
-    }
-
-    private fun isNewerVersion(
-        remoteVersionCode: Long,
-        remoteVersionName: String,
-        installedVersionCode: Long,
-        installedVersionName: String
-    ): Boolean {
-        // First check versionCode if both are non-zero and differ
-        if (remoteVersionCode > 0 && installedVersionCode > 0 && remoteVersionCode != installedVersionCode) {
-            return remoteVersionCode > installedVersionCode
+        val lParts = lClean.substringBefore("-").split(".").mapNotNull { part ->
+            part.filter { it.isDigit() }.toIntOrNull()
         }
-        // Fallback to semantic version comparison
-        return compareSemanticVersions(remoteVersionName, installedVersionName) > 0
-    }
 
-    private fun compareSemanticVersions(v1: String, v2: String): Int {
-        val parts1 = v1.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }
-        val parts2 = v2.split(Regex("[^0-9]+")).filter { it.isNotEmpty() }.mapNotNull { it.toIntOrNull() }
-        val length = maxOf(parts1.size, parts2.size)
-
-        for (i in 0 until length) {
-            val num1 = parts1.getOrElse(i) { 0 }
-            val num2 = parts2.getOrElse(i) { 0 }
-            if (num1 != num2) {
-                return num1.compareTo(num2)
+        val maxLen = maxOf(rParts.size, lParts.size)
+        for (i in 0 until maxLen) {
+            val r = rParts.getOrElse(i) { 0 }
+            val l = lParts.getOrElse(i) { 0 }
+            if (r != l) {
+                return r > l
             }
         }
-        return 0
+        return false
     }
 }

@@ -832,7 +832,8 @@ fun GalleryScreen(
         onDismiss = { viewModel.dismissUpdateState() },
         onStartDownload = { info -> viewModel.downloadUpdate(info) },
         onCancelDownload = { viewModel.cancelUpdateDownload() },
-        onSkipVersion = { versionCode -> viewModel.skipUpdateVersion(versionCode) },
+        onSkipVersion = { versionName -> viewModel.skipUpdateVersion(versionName) },
+        onRemindLater = { viewModel.remindMeLaterUpdate() },
         onRetry = { viewModel.checkForStartupUpdates() }
     )
 }

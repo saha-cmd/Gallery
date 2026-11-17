@@ -12,6 +12,8 @@ interface SettingsRepository {
     val themeMode: Flow<ThemeMode>
     val lastUpdateCheckMillis: Flow<Long>
     val skippedVersionCode: Flow<Long>
+    val skippedVersionName: Flow<String>
+    val remindLaterTimestampMillis: Flow<Long>
 
     suspend fun setXdrDisplayEnabled(enabled: Boolean)
     suspend fun setAutoHideControlsEnabled(enabled: Boolean)
@@ -23,4 +25,7 @@ interface SettingsRepository {
     suspend fun toggleEssentialAlbum(albumName: String)
     suspend fun setLastUpdateCheckMillis(timeMillis: Long)
     suspend fun setSkippedVersionCode(versionCode: Long)
+    suspend fun setSkippedVersion(versionName: String)
+    suspend fun setRemindLaterTimestamp(timestampMillis: Long)
+    suspend fun clearUpdateSuppression()
 }

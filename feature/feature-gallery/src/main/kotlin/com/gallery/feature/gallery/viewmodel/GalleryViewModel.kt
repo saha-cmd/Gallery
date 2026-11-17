@@ -189,9 +189,21 @@ class GalleryViewModel @Inject constructor(
         appUpdateRepository.cancelDownload()
     }
 
+    fun skipUpdateVersion(versionName: String) {
+        viewModelScope.launch {
+            appUpdateRepository.skipVersion(versionName)
+        }
+    }
+
     fun skipUpdateVersion(versionCode: Long) {
         viewModelScope.launch {
             appUpdateRepository.skipVersion(versionCode)
+        }
+    }
+
+    fun remindMeLaterUpdate() {
+        viewModelScope.launch {
+            appUpdateRepository.remindMeLater()
         }
     }
 

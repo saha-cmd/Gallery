@@ -2,7 +2,6 @@ package com.gallery.core.ui.components
 
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -27,7 +25,6 @@ import androidx.compose.material.icons.outlined.RocketLaunch
 import androidx.compose.material.icons.outlined.Security
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -36,6 +33,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,7 +58,8 @@ fun AppUpdateDialog(
     onDismiss: () -> Unit,
     onStartDownload: (AppUpdateInfo) -> Unit,
     onCancelDownload: () -> Unit,
-    onSkipVersion: (Long) -> Unit,
+    onSkipVersion: (String) -> Unit,
+    onRemindLater: () -> Unit,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
     currentVersionName: String? = null
@@ -90,6 +89,18 @@ fun AppUpdateDialog(
             }
             pInfo.versionName ?: "1.0.0"
         }.getOrDefault("1.0.0")
+    }
+
+    // Immediately trigger installation or permission prompt once download completes
+    LaunchedEffect(updateState) {
+        if (updateState is AppUpdateState.ReadyToInstall) {
+            if (ApkInstallerHelper.canRequestPackageInstalls(context)) {
+                ApkInstallerHelper.installApk(context, updateState.apkFile)
+            } else {
+                waitingForInstallPermission = true
+                ApkInstallerHelper.openUnknownAppSourcesSettings(context)
+            }
+        }
     }
 
     // Auto-install when returning from system unknown sources settings screen
@@ -196,7 +207,7 @@ fun AppUpdateDialog(
                         onClick = { onStartDownload(updateState.info) },
                         shape = RoundedCornerShape(12.dp)
                     ) {
-                        Text("Update Now")
+                        Text("Download")
                     }
                 }
                 is AppUpdateState.Downloading -> {
@@ -241,18 +252,18 @@ fun AppUpdateDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         TextButton(
-                            onClick = { onSkipVersion(updateState.info.versionCode) }
+                            onClick = { onSkipVersion(updateState.info.versionName) }
                         ) {
                             Text(
-                                "Skip Version",
+                                text = "Skip this version",
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                         OutlinedButton(
-                            onClick = onDismiss,
+                            onClick = onRemindLater,
                             shape = RoundedCornerShape(12.dp)
                         ) {
-                            Text("Later")
+                            Text("Remind me later")
                         }
                     }
                 }

@@ -40,6 +40,8 @@ class SettingsRepositoryImpl @Inject constructor(
         val ESSENTIAL_ALBUM_NAMES = stringSetPreferencesKey("essential_album_names")
         val LAST_UPDATE_CHECK_MILLIS = longPreferencesKey("last_update_check_millis")
         val SKIPPED_VERSION_CODE = longPreferencesKey("skipped_version_code")
+        val SKIPPED_VERSION_NAME = stringPreferencesKey("skipped_version_name")
+        val REMIND_LATER_TIMESTAMP_MILLIS = longPreferencesKey("remind_later_timestamp_millis")
     }
 
     override val settings: Flow<GallerySettings> = context.dataStore.data
@@ -56,7 +58,9 @@ class SettingsRepositoryImpl @Inject constructor(
                 essentialAlbumNames = preferences[PreferencesKeys.ESSENTIAL_ALBUM_NAMES] ?: emptySet(),
                 mergeAlbums = preferences[PreferencesKeys.MERGE_ALBUMS] ?: false,
                 lastUpdateCheckMillis = preferences[PreferencesKeys.LAST_UPDATE_CHECK_MILLIS] ?: 0L,
-                skippedVersionCode = preferences[PreferencesKeys.SKIPPED_VERSION_CODE] ?: 0L
+                skippedVersionCode = preferences[PreferencesKeys.SKIPPED_VERSION_CODE] ?: 0L,
+                skippedVersionName = preferences[PreferencesKeys.SKIPPED_VERSION_NAME] ?: "",
+                remindLaterTimestampMillis = preferences[PreferencesKeys.REMIND_LATER_TIMESTAMP_MILLIS] ?: 0L
             )
         }
 
@@ -201,6 +205,30 @@ class SettingsRepositoryImpl @Inject constructor(
             preferences[PreferencesKeys.SKIPPED_VERSION_CODE] ?: 0L
         }
 
+    override val skippedVersionName: Flow<String> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) {
+                emit(emptyPreferences())
+            } else {
+                throw exception
+            }
+        }
+        .map { preferences ->
+            preferences[PreferencesKeys.SKIPPED_VERSION_NAME] ?: ""
+        }
+
+    override val remindLaterTimestampMillis: Flow<Long> = context.dataStore.data
+        .catch { exception ->
+            if (exception is IOException) {
+                emit(emptyPreferences())
+            } else {
+                throw exception
+            }
+        }
+        .map { preferences ->
+            preferences[PreferencesKeys.REMIND_LATER_TIMESTAMP_MILLIS] ?: 0L
+        }
+
     override suspend fun setLastUpdateCheckMillis(timeMillis: Long) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.LAST_UPDATE_CHECK_MILLIS] = timeMillis
@@ -210,6 +238,26 @@ class SettingsRepositoryImpl @Inject constructor(
     override suspend fun setSkippedVersionCode(versionCode: Long) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.SKIPPED_VERSION_CODE] = versionCode
+        }
+    }
+
+    override suspend fun setSkippedVersion(versionName: String) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SKIPPED_VERSION_NAME] = versionName
+        }
+    }
+
+    override suspend fun setRemindLaterTimestamp(timestampMillis: Long) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.REMIND_LATER_TIMESTAMP_MILLIS] = timestampMillis
+        }
+    }
+
+    override suspend fun clearUpdateSuppression() {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.SKIPPED_VERSION_NAME] = ""
+            preferences[PreferencesKeys.SKIPPED_VERSION_CODE] = 0L
+            preferences[PreferencesKeys.REMIND_LATER_TIMESTAMP_MILLIS] = 0L
         }
     }
 
