@@ -510,7 +510,7 @@ fun ZoomablePhotoViewer(
                 .memoryCacheKey("orig_${item.id}")
                 .diskCacheKey("orig_${item.id}")
                 .crossfade(200)
-                .memoryCachePolicy(CachePolicy.ENABLED)
+                .memoryCachePolicy(CachePolicy.DISABLED)
                 .diskCachePolicy(CachePolicy.ENABLED)
                 .listener(
                     onSuccess = { _, result ->

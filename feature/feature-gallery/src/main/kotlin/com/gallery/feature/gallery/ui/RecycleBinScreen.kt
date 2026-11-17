@@ -43,6 +43,7 @@ import android.graphics.Bitmap
 import com.gallery.core.domain.model.RecycleBinItem
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.VerticalFastScrollbar
+import com.gallery.core.ui.util.LoadedThumbnailRegistry
 import com.gallery.feature.gallery.viewmodel.RecycleBinViewModel
 import java.io.File
 
@@ -58,7 +59,9 @@ fun RecycleBinScreen(
     var itemForActionSheet by remember { mutableStateOf<RecycleBinItem?>(null) }
     var showDeleteSelectedDialog by remember { mutableStateOf(false) }
 
-    val gridState = rememberLazyGridState()
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+    )
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
     val deleteIntentLauncher = rememberLauncherForActivityResult(
@@ -426,13 +429,15 @@ private fun RecycleBinThumbnailCard(
     var showMenu by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
-    val cacheKey = "thumb_${item.id}"
+    val cacheKey = "recycle_${item.id}"
     val imageLoader = context.imageLoader
-    val isInMemory = remember(cacheKey) {
+    val isAlreadyLoaded = LoadedThumbnailRegistry.isLoaded(cacheKey) ||
         imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-    }
     var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isInMemory || !isScrolling)
+        mutableStateOf(isAlreadyLoaded || !isScrolling)
+    }
+    if (isAlreadyLoaded && !shouldLoad) {
+        shouldLoad = true
     }
     LaunchedEffect(isScrolling) {
         if (!isScrolling) {
@@ -461,9 +466,14 @@ private fun RecycleBinThumbnailCard(
                     .allowHardware(true)
                     .memoryCacheKey(cacheKey)
                     .diskCacheKey(cacheKey)
-                    .crossfade(150)
+                    .crossfade(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
+                    .listener(
+                        onSuccess = { _, _ ->
+                            LoadedThumbnailRegistry.markLoaded(cacheKey)
+                        }
+                    )
                     .build()
             }
             AsyncImage(

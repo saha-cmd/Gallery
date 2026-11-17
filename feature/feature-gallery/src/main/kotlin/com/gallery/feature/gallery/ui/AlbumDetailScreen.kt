@@ -7,11 +7,13 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.DriveFileMove
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Close
@@ -34,7 +36,7 @@ import com.gallery.core.ui.components.MoveToAlbumDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.VerticalFastScrollbar
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun AlbumDetailScreen(
     album: Album,
@@ -158,7 +160,7 @@ fun AlbumDetailScreen(
                         // Batch Move to Album action
                         IconButton(onClick = { showMoveToAlbumDialog = true }) {
                             Icon(
-                                imageVector = Icons.Outlined.DriveFileMove,
+                                imageVector = Icons.AutoMirrored.Outlined.DriveFileMove,
                                 contentDescription = "Move to Album"
                             )
                         }
@@ -267,7 +269,9 @@ fun AlbumDetailScreen(
                     subtitle = if (album.isCustom) "Tap '+' above to add photos and videos to this album" else "No photos or videos found in this folder"
                 )
             } else {
-                val gridState = rememberLazyGridState()
+                val gridState = rememberLazyGridState(
+                    prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+                )
                 val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
                 Box(modifier = Modifier.fillMaxSize()) {
                     LazyVerticalGrid(
@@ -458,7 +462,9 @@ fun AlbumDetailScreen(
                         )
                     }
                 } else {
-                    val sheetGridState = rememberLazyGridState()
+                    val sheetGridState = rememberLazyGridState(
+                        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+                    )
                     val isSheetScrolling by remember { derivedStateOf { sheetGridState.isScrollInProgress } }
                     LazyVerticalGrid(
                         state = sheetGridState,

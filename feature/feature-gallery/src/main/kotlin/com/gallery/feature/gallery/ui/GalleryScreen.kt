@@ -71,6 +71,7 @@ import com.gallery.core.ui.components.MoveToGroupDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.RenameAlbumDialog
 import com.gallery.core.ui.components.VerticalFastScrollbar
+import com.gallery.core.ui.util.LoadedThumbnailRegistry
 import com.gallery.feature.gallery.viewmodel.AlbumGroupSection
 import com.gallery.feature.gallery.viewmodel.GalleryTab
 import com.gallery.feature.gallery.viewmodel.GalleryUiState
@@ -356,7 +357,7 @@ fun GalleryScreen(
                         state = pagerState,
                         modifier = Modifier.fillMaxSize(),
                         userScrollEnabled = !uiState.isSelectionMode && !uiState.isAlbumSelectionMode,
-                        beyondViewportPageCount = 1
+                        beyondViewportPageCount = 0
                     ) { page ->
                         Box(
                             modifier = Modifier
@@ -1205,7 +1206,9 @@ private fun TimelineGrid(
         return
     }
 
-    val gridState = rememberLazyGridState()
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+    )
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
     val flatHeaders = remember(mediaGroups) {
@@ -1254,9 +1257,7 @@ private fun TimelineGrid(
                         isSelected = mediaItem.id in selectedIds,
                         isScrolling = isScrolling,
                         targetSize = 160,
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .animateItem()
+                        modifier = Modifier.aspectRatio(1f)
                     )
                 }
             }
@@ -1299,6 +1300,7 @@ private fun DateGroupHeader(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AlbumsGrid(
     albums: List<Album>,
@@ -1327,7 +1329,9 @@ private fun AlbumsGrid(
         return
     }
 
-    val gridState = rememberLazyGridState()
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+    )
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -1591,13 +1595,15 @@ private fun AlbumCard(
     ) {
         Column {
             val context = LocalContext.current
-            val cacheKey = "thumb_${album.id}_${album.coverUri}"
+            val cacheKey = "album_cover_${album.id}_${album.coverUri}"
             val imageLoader = context.imageLoader
-            val isInMemory = remember(cacheKey) {
-                imageLoader.memoryCache?.get(coil.memory.MemoryCache.Key(cacheKey)) != null
-            }
+            val isAlreadyLoaded = LoadedThumbnailRegistry.isLoaded(cacheKey) ||
+                imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
             var shouldLoad by remember(cacheKey) {
-                mutableStateOf(isInMemory || !isScrolling)
+                mutableStateOf(isAlreadyLoaded || !isScrolling)
+            }
+            if (isAlreadyLoaded && !shouldLoad) {
+                shouldLoad = true
             }
             LaunchedEffect(isScrolling) {
                 if (!isScrolling) {
@@ -1623,9 +1629,14 @@ private fun AlbumCard(
                                 .allowHardware(true)
                                 .memoryCacheKey(cacheKey)
                                 .diskCacheKey(cacheKey)
-                                .crossfade(150)
+                                .crossfade(false)
                                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
+                                .listener(
+                                    onSuccess = { _, _ ->
+                                        LoadedThumbnailRegistry.markLoaded(cacheKey)
+                                    }
+                                )
                                 .build()
                         }
                         coil.compose.AsyncImage(
@@ -1742,6 +1753,7 @@ private fun AlbumCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun VideosGrid(
     videos: List<MediaItem.Video>,
@@ -1762,7 +1774,9 @@ private fun VideosGrid(
         return
     }
 
-    val gridState = rememberLazyGridState()
+    val gridState = rememberLazyGridState(
+        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+    )
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -1786,9 +1800,7 @@ private fun VideosGrid(
                     isSelected = video.id in selectedIds,
                     isScrolling = isScrolling,
                     targetSize = if (columns <= 2) 180 else 160,
-                    modifier = Modifier
-                        .aspectRatio(1f)
-                        .animateItem()
+                    modifier = Modifier.aspectRatio(1f)
                 )
             }
         }

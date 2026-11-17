@@ -73,6 +73,7 @@ import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.SwipeToDismissBox
 import com.gallery.core.ui.components.VaultInfoBottomSheet
 import com.gallery.core.ui.components.VerticalFastScrollbar
+import com.gallery.core.ui.util.LoadedThumbnailRegistry
 import com.gallery.feature.vault.viewmodel.VaultAlbum
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -218,7 +219,9 @@ fun VaultScreen(
                             subtitle = "No items in ${vaultState.selectedAlbumName}"
                         )
                     } else {
-                        val inAlbumGridState = rememberLazyGridState()
+                        val inAlbumGridState = rememberLazyGridState(
+                            prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+                        )
                         val isInAlbumScrolling by remember { derivedStateOf { inAlbumGridState.isScrollInProgress } }
                         Box(modifier = Modifier.fillMaxSize()) {
                             LazyVerticalGrid(
@@ -272,7 +275,9 @@ fun VaultScreen(
 
                         when (vaultState.selectedTab) {
                             VaultTab.ALL_MEDIA -> {
-                                val allMediaGridState = rememberLazyGridState()
+                                val allMediaGridState = rememberLazyGridState(
+                                    prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+                                )
                                 val isAllMediaScrolling by remember { derivedStateOf { allMediaGridState.isScrollInProgress } }
                                 Box(modifier = Modifier.fillMaxSize()) {
                                     LazyVerticalGrid(
@@ -311,7 +316,9 @@ fun VaultScreen(
                                         subtitle = "Move photos and videos to Secure Folder albums from the gallery"
                                     )
                                 } else {
-                                    val albumsGridState = rememberLazyGridState()
+                                    val albumsGridState = rememberLazyGridState(
+                                        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
+                                    )
                                     val isAlbumsScrolling by remember { derivedStateOf { albumsGridState.isScrollInProgress } }
                                     Box(modifier = Modifier.fillMaxSize()) {
                                         LazyVerticalGrid(
@@ -512,11 +519,14 @@ private fun VaultAlbumCard(
     val coverItem = album.coverItem
     val cacheKey = "vault_thumb_${coverItem?.id ?: album.name}"
     val imageLoader = context.imageLoader
-    val isInMemory = remember(cacheKey) {
-        coverBitmap != null || imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-    }
+    val isAlreadyLoaded = coverBitmap != null ||
+        LoadedThumbnailRegistry.isLoaded(cacheKey) ||
+        imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
     var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isInMemory || !isScrolling)
+        mutableStateOf(isAlreadyLoaded || !isScrolling)
+    }
+    if (isAlreadyLoaded && !shouldLoad) {
+        shouldLoad = true
     }
     LaunchedEffect(isScrolling) {
         if (!isScrolling) {
@@ -524,7 +534,7 @@ private fun VaultAlbumCard(
         }
     }
     LaunchedEffect(coverItem?.id, shouldLoad) {
-        if (shouldLoad && coverItem != null) {
+        if (shouldLoad && coverItem != null && coverBitmap == null) {
             onRequestPreview(coverItem)
         }
     }
@@ -545,15 +555,15 @@ private fun VaultAlbumCard(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                if (shouldLoad) {
-                    if (coverBitmap != null) {
-                        Image(
-                            bitmap = coverBitmap.asImageBitmap(),
-                            contentDescription = album.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else if (coverFile != null && coverFile.exists()) {
+                if (coverBitmap != null) {
+                    Image(
+                        bitmap = coverBitmap.asImageBitmap(),
+                        contentDescription = album.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (shouldLoad) {
+                    if (coverFile != null && coverFile.exists()) {
                         val thumbRequest = remember(coverFile.absolutePath) {
                             ImageRequest.Builder(context)
                                 .data(coverFile)
@@ -564,9 +574,14 @@ private fun VaultAlbumCard(
                                 .allowHardware(true)
                                 .memoryCacheKey(cacheKey)
                                 .diskCacheKey(cacheKey)
-                                .crossfade(150)
+                                .crossfade(false)
                                 .memoryCachePolicy(CachePolicy.ENABLED)
                                 .diskCachePolicy(CachePolicy.ENABLED)
+                                .listener(
+                                    onSuccess = { _, _ ->
+                                        LoadedThumbnailRegistry.markLoaded(cacheKey)
+                                    }
+                                )
                                 .build()
                         }
                         AsyncImage(
@@ -627,11 +642,14 @@ private fun VaultThumbnailCard(
     val context = LocalContext.current
     val cacheKey = "vault_thumb_${item.id}"
     val imageLoader = context.imageLoader
-    val isInMemory = remember(cacheKey) {
-        previewBitmap != null || imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-    }
+    val isAlreadyLoaded = previewBitmap != null ||
+        LoadedThumbnailRegistry.isLoaded(cacheKey) ||
+        imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
     var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isInMemory || !isScrolling)
+        mutableStateOf(isAlreadyLoaded || !isScrolling)
+    }
+    if (isAlreadyLoaded && !shouldLoad) {
+        shouldLoad = true
     }
     LaunchedEffect(isScrolling) {
         if (!isScrolling) {
@@ -639,7 +657,7 @@ private fun VaultThumbnailCard(
         }
     }
     LaunchedEffect(item.id, shouldLoad) {
-        if (shouldLoad) {
+        if (shouldLoad && previewBitmap == null) {
             onRequestPreview()
         }
     }
@@ -650,15 +668,15 @@ private fun VaultThumbnailCard(
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .clickable(onClick = onClick)
     ) {
-        if (shouldLoad) {
-            if (previewBitmap != null) {
-                Image(
-                    bitmap = previewBitmap.asImageBitmap(),
-                    contentDescription = item.originalName,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else if (previewFile != null && previewFile.exists()) {
+        if (previewBitmap != null) {
+            Image(
+                bitmap = previewBitmap.asImageBitmap(),
+                contentDescription = item.originalName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else if (shouldLoad) {
+            if (previewFile != null && previewFile.exists()) {
                 val thumbRequest = remember(previewFile.absolutePath, item.id) {
                     ImageRequest.Builder(context)
                         .data(previewFile)
@@ -669,9 +687,14 @@ private fun VaultThumbnailCard(
                         .allowHardware(true)
                         .memoryCacheKey(cacheKey)
                         .diskCacheKey(cacheKey)
-                        .crossfade(150)
+                        .crossfade(false)
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.ENABLED)
+                        .listener(
+                            onSuccess = { _, _ ->
+                                LoadedThumbnailRegistry.markLoaded(cacheKey)
+                            }
+                        )
                         .build()
                 }
                 AsyncImage(
@@ -1088,7 +1111,7 @@ private fun VaultZoomablePhoto(
                 .memoryCacheKey("orig_vault_${item.id}")
                 .diskCacheKey("orig_vault_${item.id}")
                 .crossfade(200)
-                .memoryCachePolicy(CachePolicy.ENABLED)
+                .memoryCachePolicy(CachePolicy.DISABLED)
                 .diskCachePolicy(CachePolicy.ENABLED)
                 .build()
         }

@@ -8,6 +8,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallery.core.domain.model.VaultItem
 import com.gallery.core.domain.repository.VaultRepository
+import com.gallery.core.ui.util.LoadedThumbnailRegistry
 import com.gallery.core.domain.usecase.GetVaultItemsUseCase
 import com.gallery.core.domain.usecase.RestoreFromVaultUseCase
 import com.gallery.core.security.auth.AuthResult
@@ -257,6 +258,7 @@ class VaultViewModel @Inject constructor(
                     }
                     val bmp = BitmapFactory.decodeFile(cachedThumb.absolutePath, options)
                     if (bmp != null) {
+                        LoadedThumbnailRegistry.markLoaded("vault_thumb_${item.id}")
                         _vaultState.update { current ->
                             current.copy(
                                 previewBitmaps = current.previewBitmaps + (item.id to bmp),
@@ -318,6 +320,9 @@ class VaultViewModel @Inject constructor(
                         }
                     }
 
+                    if (bitmap != null) {
+                        LoadedThumbnailRegistry.markLoaded("vault_thumb_${item.id}")
+                    }
                     _vaultState.update { current ->
                         current.copy(
                             previewFiles = current.previewFiles + (item.id to (if (thumbFile.exists()) thumbFile else file)),

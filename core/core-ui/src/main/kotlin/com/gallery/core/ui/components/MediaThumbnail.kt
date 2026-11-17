@@ -29,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -42,6 +43,7 @@ import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Scale
 import com.gallery.core.domain.model.MediaItem
+import com.gallery.core.ui.util.LoadedThumbnailRegistry
 import java.io.File
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -56,34 +58,45 @@ fun MediaThumbnail(
     isScrolling: Boolean = false,
     targetSize: Int = 160
 ) {
-    val animatedPadding by animateDpAsState(
-        targetValue = if (isSelected) 4.dp else 0.dp,
-        label = "selectedPadding"
-    )
-
-    Box(
-        modifier = modifier
+    val cellModifier = if (isSelectionMode) {
+        val animatedPadding by animateDpAsState(
+            targetValue = if (isSelected) 4.dp else 0.dp,
+            label = "selectedPadding"
+        )
+        val shape = RoundedCornerShape(if (isSelected) 8.dp else 0.dp)
+        modifier
             .padding(animatedPadding)
-            .clip(RoundedCornerShape(if (isSelected) 8.dp else 0.dp))
+            .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .border(
                 width = if (isSelected) 2.5.dp else 0.dp,
                 color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(if (isSelected) 8.dp else 0.dp)
+                shape = shape
             )
-            .combinedClickable(
-                onClick = onClick,
-                onLongClick = onLongClick
-            )
+    } else {
+        modifier
+            .padding(0.dp)
+            .clip(RectangleShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .border(0.dp, Color.Transparent, RectangleShape)
+    }
+
+    Box(
+        modifier = cellModifier.combinedClickable(
+            onClick = onClick,
+            onLongClick = onLongClick
+        )
     ) {
         val context = LocalContext.current
         val cacheKey = "thumb_${item.id}"
         val imageLoader = context.imageLoader
-        val isInMemory = remember(cacheKey) {
+        val isAlreadyLoaded = LoadedThumbnailRegistry.isLoaded(cacheKey) ||
             imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-        }
         var shouldLoad by remember(cacheKey) {
-            mutableStateOf(isInMemory || !isScrolling)
+            mutableStateOf(isAlreadyLoaded || !isScrolling)
+        }
+        if (isAlreadyLoaded && !shouldLoad) {
+            shouldLoad = true
         }
 
         LaunchedEffect(isScrolling) {
@@ -103,9 +116,14 @@ fun MediaThumbnail(
                     .allowHardware(true)
                     .memoryCacheKey(cacheKey)
                     .diskCacheKey(cacheKey)
-                    .crossfade(150)
+                    .crossfade(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
+                    .listener(
+                        onSuccess = { _, _ ->
+                            LoadedThumbnailRegistry.markLoaded(cacheKey)
+                        }
+                    )
                     .build()
             }
 

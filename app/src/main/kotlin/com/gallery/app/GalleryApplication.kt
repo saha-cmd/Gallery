@@ -15,7 +15,8 @@ class GalleryApplication : Application(), ImageLoaderFactory {
         return ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.30) // 30% of available RAM
+                    .maxSizePercent(0.35)
+                    .strongReferencesEnabled(true)
                     .build()
             }
             .diskCache {
