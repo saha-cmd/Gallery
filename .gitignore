@@ -1,0 +1,41 @@
+# Built binaries & caches
+*.apk
+*.aab
+*.aar
+*.ap_
+*.dex
+*.class
+bin/
+gen/
+out/
+release/
+build/
+*/build/
+# Gradle files
+.gradle/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+
+# Local machine & IDE configs
+local.properties
+.idea/
+*.iml
+captures/
+.navigation/
+proguard/
+*.log
+
+# Signing credentials & keystores (NEVER commit)
+keystore.properties
+*.jks
+*.keystore
+README_CREDENTIALS.txt
+release-key-credentials.txt
+
+# Local source bundles
+gallery_app_source_bundle.md
+
+# OS-specific files
+.DS_Store
+Thumbs.db

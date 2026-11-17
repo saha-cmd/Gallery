@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Gallery</string>
+    <string name="permission_required">Storage permission required</string>
+    <string name="permission_rationale">Gallery needs access to your photos and videos to display them.</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="vault_title">Secure Vault</string>
+    <string name="vault_subtitle">Authenticate to access your private media</string>
+    <string name="vault_pin_hint">Enter PIN</string>
+    <string name="use_pin">Use PIN</string>
+    <string name="auth_failed">Authentication failed</string>
+    <string name="tab_timeline">Timeline</string>
+    <string name="tab_albums">Albums</string>
+    <string name="tab_videos">Videos</string>
+</resources>
