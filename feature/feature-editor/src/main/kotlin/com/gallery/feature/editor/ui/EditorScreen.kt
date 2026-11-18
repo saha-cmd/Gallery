@@ -1,7 +1,9 @@
 package com.gallery.feature.editor.ui
 
 import android.app.Activity
+import android.content.Context
 import android.net.Uri
+import android.webkit.MimeTypeMap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -41,10 +43,23 @@ import java.io.File
 @Composable
 fun EditorScreen(
     mediaUriString: String,
+    isVideo: Boolean = false,
     onBack: () -> Unit,
     viewModel: EditorViewModel = hiltViewModel()
 ) {
     val context = LocalContext.current
+    val resolvedIsVideo = remember(mediaUriString, isVideo) {
+        isVideo || isVideoUri(context, Uri.parse(mediaUriString))
+    }
+
+    if (resolvedIsVideo) {
+        VideoEditorScreen(
+            mediaUriString = mediaUriString,
+            onBack = onBack
+        )
+        return
+    }
+
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showAdjustPanel by remember { mutableStateOf(false) }
 
@@ -290,8 +305,27 @@ fun EditorScreen(
     }
 }
 
+private fun isVideoUri(context: Context, uri: Uri): Boolean {
+    val resolvedMime = try {
+        context.contentResolver.getType(uri)
+    } catch (_: Exception) {
+        null
+    }
+    if (resolvedMime?.startsWith("video/", ignoreCase = true) == true) {
+        return true
+    }
+    val ext = MimeTypeMap.getFileExtensionFromUrl(uri.toString()).lowercase()
+    if (ext.isNotEmpty()) {
+        val extMime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        if (extMime?.startsWith("video/", ignoreCase = true) == true) {
+            return true
+        }
+    }
+    return ext in setOf("mp4", "mkv", "webm", "mov", "3gp", "avi", "m4v")
+}
+
 @Composable
-private fun FilterChipItem(
+internal fun FilterChipItem(
     label: String,
     isSelected: Boolean,
     onClick: () -> Unit

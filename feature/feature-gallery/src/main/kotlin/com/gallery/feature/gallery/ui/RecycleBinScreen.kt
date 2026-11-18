@@ -4,9 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
@@ -41,9 +39,10 @@ import coil.size.Precision
 import coil.size.Scale
 import android.graphics.Bitmap
 import com.gallery.core.domain.model.RecycleBinItem
+import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.components.pinchToZoomGrid
+import com.gallery.core.ui.components.gridThumbnailTargetSize
 import com.gallery.feature.gallery.viewmodel.RecycleBinViewModel
 import java.io.File
 
@@ -59,11 +58,6 @@ fun RecycleBinScreen(
     var itemToDeletePermanently by remember { mutableStateOf<RecycleBinItem?>(null) }
     var itemForActionSheet by remember { mutableStateOf<RecycleBinItem?>(null) }
     var showDeleteSelectedDialog by remember { mutableStateOf(false) }
-
-    val gridState = rememberLazyGridState(
-        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-    )
-    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
 
     val deleteIntentLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
@@ -174,20 +168,33 @@ fun RecycleBinScreen(
                     )
                 }
                 else -> {
-                    Box(modifier = Modifier.fillMaxSize()) {
+                    AnimatedPinchGridContainer(
+                        currentColumns = gridColumns,
+                        onColumnsChanged = viewModel::setGridColumns,
+                        minColumns = 2,
+                        maxColumns = 7,
+                        modifier = Modifier.fillMaxSize(),
+                        overlayContent = { activeGridState, _ ->
+                            // Fast Scrollbar overlaid on deleted items grid
+                            VerticalFastScrollbar(
+                                gridState = activeGridState,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    ) { layerColumns, layerGridState, isPreviewLayer, tileAspectRatio ->
+                        val targetSize = gridThumbnailTargetSize(layerColumns)
+                        val isLayerScrolling by remember(layerGridState) {
+                            derivedStateOf { layerGridState.isScrollInProgress }
+                        }
+                        val effectiveScrolling = if (isPreviewLayer) false else isLayerScrolling
+
                         LazyVerticalGrid(
-                            state = gridState,
-                            columns = GridCells.Fixed(gridColumns),
+                            state = layerGridState,
+                            columns = GridCells.Fixed(layerColumns),
                             contentPadding = PaddingValues(2.dp),
                             horizontalArrangement = Arrangement.spacedBy(2.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp),
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .pinchToZoomGrid(
-                                    currentColumns = gridColumns,
-                                    gridState = gridState,
-                                    onColumnsChanged = viewModel::setGridColumns
-                                )
+                            modifier = Modifier.fillMaxSize()
                         ) {
                             items(uiState.items, key = { it.id }) { item ->
                                 val isSelected = item.id in uiState.selectedItemIds
@@ -195,7 +202,10 @@ fun RecycleBinScreen(
                                     item = item,
                                     isSelectionMode = uiState.isSelectionMode,
                                     isSelected = isSelected,
-                                    isScrolling = isScrolling,
+                                    isScrolling = effectiveScrolling,
+                                    forceLoad = isPreviewLayer,
+                                    targetSize = targetSize,
+                                    aspectRatio = tileAspectRatio,
                                     onClick = {
                                         if (uiState.isSelectionMode) {
                                             viewModel.toggleSelection(item.id)
@@ -212,12 +222,6 @@ fun RecycleBinScreen(
                                 )
                             }
                         }
-
-                        // Fast Scrollbar overlaid on deleted items grid
-                        VerticalFastScrollbar(
-                            gridState = gridState,
-                            modifier = Modifier.fillMaxSize()
-                        )
                     }
                 }
             }
@@ -431,6 +435,9 @@ private fun RecycleBinThumbnailCard(
     onRestore: () -> Unit,
     onDeletePermanently: () -> Unit,
     isScrolling: Boolean = false,
+    forceLoad: Boolean = false,
+    targetSize: Int = 150,
+    aspectRatio: Float = 1f,
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -439,21 +446,24 @@ private fun RecycleBinThumbnailCard(
     val cacheKey = "recycle_${item.id}"
     val imageLoader = context.imageLoader
     val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-    var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isInMemoryCache || !isScrolling)
+    var hasLoadedInViewport by remember(cacheKey) {
+        mutableStateOf(forceLoad || isInMemoryCache || !isScrolling)
     }
-    if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
-        shouldLoad = true
+    val shouldLoad = forceLoad || hasLoadedInViewport || isInMemoryCache || !isScrolling
+    SideEffect {
+        if (shouldLoad && !hasLoadedInViewport) {
+            hasLoadedInViewport = true
+        }
     }
     DisposableEffect(cacheKey) {
         onDispose {
-            shouldLoad = false
+            hasLoadedInViewport = false
         }
     }
 
     Box(
         modifier = modifier
-            .aspectRatio(1f)
+            .aspectRatio(aspectRatio)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .combinedClickable(
                 onClick = onClick,
@@ -462,16 +472,18 @@ private fun RecycleBinThumbnailCard(
     ) {
         if (shouldLoad) {
             val filePath = item.trashedFilePath.ifEmpty { item.storedFilePath }
-            val thumbRequest = remember(item.id, filePath) {
+            val decodeSize = if (forceLoad) 110 else targetSize
+            val thumbRequest = remember(item.id, filePath, decodeSize) {
                 ImageRequest.Builder(context)
                     .data(File(filePath))
-                    .size(160, 160)
+                    .size(decodeSize, decodeSize)
                     .precision(Precision.INEXACT)
                     .scale(Scale.FILL)
                     .bitmapConfig(Bitmap.Config.RGB_565)
                     .allowHardware(true)
                     .memoryCacheKey(cacheKey)
                     .diskCacheKey(cacheKey)
+                    .placeholderMemoryCacheKey(cacheKey)
                     .crossfade(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)

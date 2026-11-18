@@ -77,11 +77,13 @@ import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Scale
 import com.gallery.core.domain.model.VaultItem
+import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.SwipeToDismissBox
 import com.gallery.core.ui.components.VaultInfoBottomSheet
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.components.pinchToZoomGrid
+import com.gallery.core.ui.components.gridThumbnailTargetSize
+import com.gallery.core.ui.components.rememberViewportOnlyLazyGridState
 import com.gallery.feature.vault.R
 import com.gallery.feature.vault.viewmodel.VaultAlbum
 import kotlinx.coroutines.Job
@@ -231,42 +233,52 @@ fun VaultScreen(
                             subtitle = "No items in ${vaultState.selectedAlbumName}"
                         )
                     } else {
-                        val inAlbumGridState = rememberLazyGridState(
-                            prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-                        )
-                        val isInAlbumScrolling by remember { derivedStateOf { inAlbumGridState.isScrollInProgress } }
-                        Box(modifier = Modifier.fillMaxSize()) {
+                        val inAlbumPreviewRefs = remember { mutableMapOf<String, Int>() }
+                        AnimatedPinchGridContainer(
+                            currentColumns = gridColumns,
+                            onColumnsChanged = viewModel::setGridColumns,
+                            minColumns = 2,
+                            maxColumns = 7,
+                            modifier = Modifier.fillMaxSize(),
+                            overlayContent = { activeGridState, _ ->
+                                VerticalFastScrollbar(
+                                    gridState = activeGridState,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            }
+                        ) { layerColumns, layerGridState, isPreviewLayer, tileAspectRatio ->
+                            val targetSize = gridThumbnailTargetSize(layerColumns)
+                            val isLayerScrolling by remember(layerGridState) {
+                                derivedStateOf { layerGridState.isScrollInProgress }
+                            }
+                            val effectiveScrolling = if (isPreviewLayer) false else isLayerScrolling
+
                             LazyVerticalGrid(
-                                state = inAlbumGridState,
-                                columns = GridCells.Fixed(gridColumns),
+                                state = layerGridState,
+                                columns = GridCells.Fixed(layerColumns),
                                 contentPadding = PaddingValues(2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                                 verticalArrangement = Arrangement.spacedBy(2.dp),
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .pinchToZoomGrid(
-                                        currentColumns = gridColumns,
-                                        gridState = inAlbumGridState,
-                                        onColumnsChanged = viewModel::setGridColumns
-                                    )
+                                modifier = Modifier.fillMaxSize()
                             ) {
                                 items(displayedItems, key = { it.id }) { vaultItem ->
                                     VaultThumbnailCard(
                                         item = vaultItem,
                                         previewFile = vaultState.previewFiles[vaultItem.id],
                                         isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
-                                        isScrolling = isInAlbumScrolling,
+                                        isScrolling = effectiveScrolling,
+                                        isPreviewLayer = isPreviewLayer,
+                                        activeRefCounts = inAlbumPreviewRefs,
+                                        targetSize = targetSize,
+                                        aspectRatio = tileAspectRatio,
                                         onRequestPreview = { viewModel.requestPreview(vaultItem) },
+                                        onReleasePreview = { viewModel.releasePreview(vaultItem.id) },
                                         onClick = { viewModel.openViewer(vaultItem, displayedItems) },
                                         onRestore = { viewModel.restoreItemToGallery(vaultItem) },
                                         onDelete = { itemToDelete = vaultItem }
                                     )
                                 }
                             }
-                            VerticalFastScrollbar(
-                                gridState = inAlbumGridState,
-                                modifier = Modifier.fillMaxSize()
-                            )
                         }
                     }
                 }
@@ -292,42 +304,52 @@ fun VaultScreen(
 
                         when (vaultState.selectedTab) {
                             VaultTab.ALL_MEDIA -> {
-                                val allMediaGridState = rememberLazyGridState(
-                                    prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-                                )
-                                val isAllMediaScrolling by remember { derivedStateOf { allMediaGridState.isScrollInProgress } }
-                                Box(modifier = Modifier.fillMaxSize()) {
+                                val allMediaPreviewRefs = remember { mutableMapOf<String, Int>() }
+                                AnimatedPinchGridContainer(
+                                    currentColumns = gridColumns,
+                                    onColumnsChanged = viewModel::setGridColumns,
+                                    minColumns = 2,
+                                    maxColumns = 7,
+                                    modifier = Modifier.fillMaxSize(),
+                                    overlayContent = { activeGridState, _ ->
+                                        VerticalFastScrollbar(
+                                            gridState = activeGridState,
+                                            modifier = Modifier.fillMaxSize()
+                                        )
+                                    }
+                                ) { layerColumns, layerGridState, isPreviewLayer, tileAspectRatio ->
+                                    val targetSize = gridThumbnailTargetSize(layerColumns)
+                                    val isLayerScrolling by remember(layerGridState) {
+                                        derivedStateOf { layerGridState.isScrollInProgress }
+                                    }
+                                    val effectiveScrolling = if (isPreviewLayer) false else isLayerScrolling
+
                                     LazyVerticalGrid(
-                                        state = allMediaGridState,
-                                        columns = GridCells.Fixed(gridColumns),
+                                        state = layerGridState,
+                                        columns = GridCells.Fixed(layerColumns),
                                         contentPadding = PaddingValues(2.dp),
                                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                                         verticalArrangement = Arrangement.spacedBy(2.dp),
-                                        modifier = Modifier
-                                            .fillMaxSize()
-                                            .pinchToZoomGrid(
-                                                currentColumns = gridColumns,
-                                                gridState = allMediaGridState,
-                                                onColumnsChanged = viewModel::setGridColumns
-                                            )
+                                        modifier = Modifier.fillMaxSize()
                                     ) {
                                         items(vaultState.items, key = { it.id }) { vaultItem ->
                                             VaultThumbnailCard(
                                                 item = vaultItem,
                                                 previewFile = vaultState.previewFiles[vaultItem.id],
                                                 isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
-                                                isScrolling = isAllMediaScrolling,
+                                                isScrolling = effectiveScrolling,
+                                                isPreviewLayer = isPreviewLayer,
+                                                activeRefCounts = allMediaPreviewRefs,
+                                                targetSize = targetSize,
+                                                aspectRatio = tileAspectRatio,
                                                 onRequestPreview = { viewModel.requestPreview(vaultItem) },
+                                                onReleasePreview = { viewModel.releasePreview(vaultItem.id) },
                                                 onClick = { viewModel.openViewer(vaultItem, vaultState.items) },
                                                 onRestore = { viewModel.restoreItemToGallery(vaultItem) },
                                                 onDelete = { itemToDelete = vaultItem }
                                             )
                                         }
                                     }
-                                    VerticalFastScrollbar(
-                                        gridState = allMediaGridState,
-                                        modifier = Modifier.fillMaxSize()
-                                    )
                                 }
                             }
                             VaultTab.ALBUMS -> {
@@ -338,9 +360,7 @@ fun VaultScreen(
                                         subtitle = "Move photos and videos to Secure Folder albums from the gallery"
                                     )
                                 } else {
-                                    val albumsGridState = rememberLazyGridState(
-                                        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-                                    )
+                                    val albumsGridState = rememberViewportOnlyLazyGridState()
                                     val isAlbumsScrolling by remember { derivedStateOf { albumsGridState.isScrollInProgress } }
                                     Box(modifier = Modifier.fillMaxSize()) {
                                         LazyVerticalGrid(
@@ -357,6 +377,7 @@ fun VaultScreen(
                                                     coverFile = album.coverItem?.let { vaultState.previewFiles[it.id] },
                                                     isScrolling = isAlbumsScrolling,
                                                     onRequestPreview = { viewModel.requestPreview(it) },
+                                                    onReleasePreview = { viewModel.releasePreview(it.id) },
                                                     onClick = { viewModel.openAlbum(album.name) }
                                                 )
                                             }
@@ -533,6 +554,7 @@ private fun VaultAlbumCard(
     onClick: () -> Unit,
     isScrolling: Boolean = false,
     onRequestPreview: (VaultItem) -> Unit = {},
+    onReleasePreview: (VaultItem) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -540,18 +562,25 @@ private fun VaultAlbumCard(
     val cacheKey = "vault_thumb_${coverItem?.id ?: album.name}"
     val imageLoader = context.imageLoader
     val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-    var shouldLoad by remember(cacheKey) {
+    var hasLoadedInViewport by remember(cacheKey) {
         mutableStateOf(isInMemoryCache || !isScrolling)
     }
-    if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
-        shouldLoad = true
+    val shouldLoad = hasLoadedInViewport || isInMemoryCache || !isScrolling
+    SideEffect {
+        if (shouldLoad && !hasLoadedInViewport) {
+            hasLoadedInViewport = true
+        }
     }
     DisposableEffect(cacheKey) {
         onDispose {
-            shouldLoad = false
+            hasLoadedInViewport = false
+            imageLoader.memoryCache?.remove(MemoryCache.Key(cacheKey))
+            if (coverItem != null) {
+                onReleasePreview(coverItem)
+            }
         }
     }
-    LaunchedEffect(coverItem?.id, shouldLoad) {
+    LaunchedEffect(coverItem?.id, shouldLoad, coverFile) {
         if (shouldLoad && coverItem != null && coverFile == null) {
             onRequestPreview(coverItem)
         }
@@ -630,7 +659,12 @@ private fun VaultThumbnailCard(
     onRestore: () -> Unit,
     onDelete: () -> Unit,
     isScrolling: Boolean = false,
+    isPreviewLayer: Boolean = false,
+    activeRefCounts: MutableMap<String, Int>? = null,
+    targetSize: Int = 150,
+    aspectRatio: Float = 1f,
     onRequestPreview: () -> Unit = {},
+    onReleasePreview: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -639,18 +673,35 @@ private fun VaultThumbnailCard(
     val cacheKey = "vault_thumb_${item.id}"
     val imageLoader = context.imageLoader
     val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-    var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isInMemoryCache || !isScrolling)
+    var hasLoadedInViewport by remember(cacheKey) {
+        mutableStateOf(isPreviewLayer || isInMemoryCache || !isScrolling)
     }
-    if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
-        shouldLoad = true
-    }
-    DisposableEffect(cacheKey) {
-        onDispose {
-            shouldLoad = false
+    val shouldLoad = isPreviewLayer || hasLoadedInViewport || isInMemoryCache || !isScrolling
+    SideEffect {
+        if (shouldLoad && !hasLoadedInViewport) {
+            hasLoadedInViewport = true
         }
     }
-    LaunchedEffect(item.id, shouldLoad) {
+    DisposableEffect(cacheKey) {
+        if (activeRefCounts != null) {
+            activeRefCounts[cacheKey] = (activeRefCounts[cacheKey] ?: 0) + 1
+        }
+        onDispose {
+            hasLoadedInViewport = false
+            val remaining = if (activeRefCounts != null) {
+                val next = ((activeRefCounts[cacheKey] ?: 1) - 1).coerceAtLeast(0)
+                if (next == 0) activeRefCounts.remove(cacheKey) else activeRefCounts[cacheKey] = next
+                next
+            } else {
+                0
+            }
+            if (remaining == 0) {
+                imageLoader.memoryCache?.remove(MemoryCache.Key(cacheKey))
+                onReleasePreview()
+            }
+        }
+    }
+    LaunchedEffect(item.id, shouldLoad, previewFile) {
         if (shouldLoad && previewFile == null) {
             onRequestPreview()
         }
@@ -658,22 +709,24 @@ private fun VaultThumbnailCard(
 
     Box(
         modifier = modifier
-            .aspectRatio(1f)
+            .aspectRatio(aspectRatio)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .clickable(onClick = onClick)
     ) {
         if (shouldLoad) {
             if (previewFile != null && previewFile.exists()) {
-                val thumbRequest = remember(previewFile.absolutePath, item.id) {
+                val decodeSize = if (isPreviewLayer) 110 else targetSize
+                val thumbRequest = remember(previewFile.absolutePath, item.id, decodeSize) {
                     ImageRequest.Builder(context)
                         .data(previewFile)
-                        .size(160, 160)
+                        .size(decodeSize, decodeSize)
                         .precision(Precision.INEXACT)
                         .scale(Scale.FILL)
                         .bitmapConfig(Bitmap.Config.RGB_565)
                         .allowHardware(true)
                         .memoryCacheKey(cacheKey)
                         .diskCacheKey(cacheKey)
+                        .placeholderMemoryCacheKey(cacheKey)
                         .crossfade(false)
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.ENABLED)

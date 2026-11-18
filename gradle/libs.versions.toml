@@ -67,9 +67,11 @@ datastore-preferences = { module = "androidx.datastore:datastore-preferences", v
 security-crypto = { module = "androidx.security:security-crypto", version.ref = "security-crypto" }
 biometric = { module = "androidx.biometric:biometric", version.ref = "biometric" }
 
-# Video Playback
+# Video Playback & Editing
 exoplayer = { module = "androidx.media3:media3-exoplayer", version.ref = "exoplayer" }
 exoplayer-ui = { module = "androidx.media3:media3-ui", version.ref = "exoplayer" }
+media3-transformer = { module = "androidx.media3:media3-transformer", version.ref = "exoplayer" }
+media3-effect = { module = "androidx.media3:media3-effect", version.ref = "exoplayer" }
 
 # Coroutines
 coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "coroutines" }

@@ -8,7 +8,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.material.icons.Icons
@@ -29,13 +28,15 @@ import androidx.compose.ui.unit.dp
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.ui.components.AddToAlbumDialog
+import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.CreateAlbumDialog
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.MediaThumbnail
 import com.gallery.core.ui.components.MoveToAlbumDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.components.pinchToZoomGrid
+import com.gallery.core.ui.components.gridThumbnailTargetSize
+import com.gallery.core.ui.components.rememberViewportOnlyLazyGridState
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -271,24 +272,32 @@ fun AlbumDetailScreen(
                     subtitle = if (album.isCustom) "Tap '+' above to add photos and videos to this album" else "No photos or videos found in this folder"
                 )
             } else {
-                val gridState = rememberLazyGridState(
-                    prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-                )
-                val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
-                Box(modifier = Modifier.fillMaxSize()) {
+                AnimatedPinchGridContainer(
+                    currentColumns = columnCount,
+                    onColumnsChanged = onColumnCountChanged,
+                    minColumns = 2,
+                    maxColumns = 7,
+                    modifier = Modifier.fillMaxSize(),
+                    overlayContent = { activeGridState, _ ->
+                        VerticalFastScrollbar(
+                            gridState = activeGridState,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    }
+                ) { layerColumns, layerGridState, isPreviewLayer, tileAspectRatio ->
+                    val targetSize = gridThumbnailTargetSize(layerColumns)
+                    val isLayerScrolling by remember(layerGridState) {
+                        derivedStateOf { layerGridState.isScrollInProgress }
+                    }
+                    val effectiveScrolling = if (isPreviewLayer) false else isLayerScrolling
+
                     LazyVerticalGrid(
-                        state = gridState,
-                        columns = GridCells.Fixed(columnCount),
+                        state = layerGridState,
+                        columns = GridCells.Fixed(layerColumns),
                         contentPadding = PaddingValues(2.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .pinchToZoomGrid(
-                                currentColumns = columnCount,
-                                gridState = gridState,
-                                onColumnsChanged = onColumnCountChanged
-                            )
+                        modifier = Modifier.fillMaxSize()
                     ) {
                         items(album.items, key = { it.id }) { mediaItem ->
                             MediaThumbnail(
@@ -305,17 +314,13 @@ fun AlbumDetailScreen(
                                 },
                                 isSelectionMode = isSelectionMode,
                                 isSelected = mediaItem.id in selectedIds,
-                                isScrolling = isScrolling,
-                                targetSize = if (columnCount <= 2) 200 else 160,
-                                modifier = Modifier.aspectRatio(1f)
+                                isScrolling = effectiveScrolling,
+                                forceLoad = isPreviewLayer,
+                                targetSize = targetSize,
+                                modifier = Modifier.aspectRatio(tileAspectRatio)
                             )
                         }
                     }
-
-                    VerticalFastScrollbar(
-                        gridState = gridState,
-                        modifier = Modifier.fillMaxSize()
-                    )
                 }
             }
         }
@@ -470,9 +475,7 @@ fun AlbumDetailScreen(
                         )
                     }
                 } else {
-                    val sheetGridState = rememberLazyGridState(
-                        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-                    )
+                    val sheetGridState = rememberViewportOnlyLazyGridState()
                     val isSheetScrolling by remember { derivedStateOf { sheetGridState.isScrollInProgress } }
                     LazyVerticalGrid(
                         state = sheetGridState,

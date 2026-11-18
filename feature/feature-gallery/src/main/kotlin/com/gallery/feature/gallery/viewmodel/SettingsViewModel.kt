@@ -91,7 +91,7 @@ class SettingsViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
 
     val themeMode: StateFlow<ThemeMode> = getThemeModeUseCase()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), ThemeMode.SYSTEM)

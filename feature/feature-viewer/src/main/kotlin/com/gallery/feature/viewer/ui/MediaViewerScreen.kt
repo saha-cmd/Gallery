@@ -102,7 +102,7 @@ fun MediaViewerScreen(
     mediaId: Long,
     isVideo: Boolean,
     onBack: () -> Unit,
-    onEdit: (String) -> Unit,
+    onEdit: (String, Boolean) -> Unit,
     albumId: Long = -1L,
     viewModel: ViewerViewModel = hiltViewModel()
 ) {
@@ -350,7 +350,7 @@ fun MediaViewerScreen(
                         onMoveToAlbum = { itemToMoveToAlbum = it },
                         onBack = onBack,
                         onEdit = { item ->
-                            onEdit(item.uri.toString())
+                            onEdit(item.uri.toString(), item is MediaItem.Video)
                         },
                         onShare = { item ->
                             val shareIntent = Intent(Intent.ACTION_SEND).apply {
@@ -1426,14 +1426,12 @@ private fun ViewerControlsOverlay(
                             onClick = { onShare(item) }
                         )
 
-                        // 2. Edit (Photos only)
-                        if (item is MediaItem.Photo) {
-                            ViewerActionItem(
-                                icon = Icons.Outlined.Edit,
-                                label = "Edit",
-                                onClick = { onEdit(item) }
-                            )
-                        }
+                        // 2. Edit (Photos and Videos)
+                        ViewerActionItem(
+                            icon = Icons.Outlined.Edit,
+                            label = "Edit",
+                            onClick = { onEdit(item) }
+                        )
 
                         // 3. Info
                         ViewerActionItem(

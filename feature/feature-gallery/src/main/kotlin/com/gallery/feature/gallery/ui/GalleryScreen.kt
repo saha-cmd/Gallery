@@ -9,10 +9,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
@@ -54,9 +52,9 @@ import coil.memory.MemoryCache
 import kotlinx.coroutines.launch
 import kotlin.math.absoluteValue
 import com.gallery.core.domain.model.Album
-import com.gallery.core.domain.model.AppUpdateState
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.ui.components.AddToAlbumDialog
+import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.AppUpdateDialog
 import com.gallery.core.ui.components.ChangeAlbumCoverDialog
 import com.gallery.core.ui.components.CreateAlbumDialog
@@ -71,10 +69,10 @@ import com.gallery.core.ui.components.MoveToGroupDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.RenameAlbumDialog
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.components.pinchToZoomGrid
+import com.gallery.core.ui.components.gridThumbnailTargetSize
+import com.gallery.core.ui.components.rememberViewportOnlyLazyGridState
 import com.gallery.feature.gallery.viewmodel.AlbumGroupSection
 import com.gallery.feature.gallery.viewmodel.GalleryTab
-import com.gallery.feature.gallery.viewmodel.GalleryUiState
 import com.gallery.feature.gallery.viewmodel.GalleryViewModel
 import com.gallery.feature.gallery.viewmodel.MediaGroup
 import com.gallery.feature.gallery.viewmodel.UserAlbumGroupUiModel
@@ -376,10 +374,12 @@ fun GalleryScreen(
                             when (GalleryTab.entries[page]) {
                                 GalleryTab.TIMELINE -> TimelineGrid(
                                     mediaGroups = uiState.mediaGroups,
+                                    monthlyMediaGroups = uiState.monthlyMediaGroups,
                                     columns = gridColumns,
                                     onColumnsChanged = viewModel::setGridColumns,
                                     isSelectionMode = uiState.isSelectionMode,
                                     selectedIds = uiState.selectedItemIds,
+                                    isParentScrolling = { pagerState.isScrollInProgress },
                                     onItemClick = { item ->
                                         if (uiState.isSelectionMode) {
                                             viewModel.toggleSelection(item.id)
@@ -404,6 +404,7 @@ fun GalleryScreen(
                                     collapsedGroups = collapsedGroups,
                                     isAlbumSelectionMode = uiState.isAlbumSelectionMode,
                                     selectedAlbumIds = uiState.selectedAlbumIds,
+                                    isParentScrolling = { pagerState.isScrollInProgress },
                                     onToggleGroupCollapsed = { viewModel.toggleGroupCollapsed(it) },
                                     onAlbumClick = { album ->
                                         if (uiState.isAlbumSelectionMode) {
@@ -429,6 +430,7 @@ fun GalleryScreen(
                                     onColumnsChanged = viewModel::setGridColumns,
                                     isSelectionMode = uiState.isSelectionMode,
                                     selectedIds = uiState.selectedItemIds,
+                                    isParentScrolling = { pagerState.isScrollInProgress },
                                     onVideoClick = { video ->
                                         if (uiState.isSelectionMode) {
                                             viewModel.toggleSelection(video.id)
@@ -1193,12 +1195,14 @@ private fun FloatingNavItem(
 @Composable
 private fun TimelineGrid(
     mediaGroups: List<MediaGroup>,
+    monthlyMediaGroups: List<MediaGroup>,
     columns: Int,
     onColumnsChanged: (Int) -> Unit,
     isSelectionMode: Boolean,
     selectedIds: Set<Long>,
     onItemClick: (MediaItem) -> Unit,
     onItemLongClick: (MediaItem) -> Unit,
+    isParentScrolling: () -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
     if (mediaGroups.isEmpty()) {
@@ -1211,45 +1215,64 @@ private fun TimelineGrid(
         return
     }
 
-    val gridState = rememberLazyGridState(
-        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-    )
-    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
-
-    val flatHeaders = remember(mediaGroups) {
-        val list = mutableListOf<String>()
-        mediaGroups.forEach { group ->
-            list.add(group.dateLabel)
-            group.items.forEach { _ ->
-                list.add(group.dateLabel)
+    AnimatedPinchGridContainer(
+        currentColumns = columns,
+        onColumnsChanged = onColumnsChanged,
+        minColumns = 2,
+        maxColumns = 7,
+        onResolveTargetAnchorIndex = { sourceCols, targetCols, sourceFlatIndex ->
+            val srcGroups = if (sourceCols >= 5) monthlyMediaGroups else mediaGroups
+            val dstGroups = if (targetCols >= 5) monthlyMediaGroups else mediaGroups
+            resolveTimelineAnchorIndex(srcGroups, dstGroups, sourceFlatIndex)
+        },
+        modifier = modifier.fillMaxSize(),
+        overlayContent = { activeGridState, activeColumns ->
+            val activeGroups = if (activeColumns >= 5) monthlyMediaGroups else mediaGroups
+            val flatHeaders = remember(activeGroups) {
+                val list = mutableListOf<String>()
+                activeGroups.forEach { group ->
+                    list.add(group.dateLabel)
+                    group.items.forEach { _ ->
+                        list.add(group.dateLabel)
+                    }
+                }
+                list
             }
+            VerticalFastScrollbar(
+                gridState = activeGridState,
+                modifier = Modifier.fillMaxSize(),
+                labelProvider = { index ->
+                    if (index in flatHeaders.indices) flatHeaders[index] else ""
+                }
+            )
         }
-        list
-    }
+    ) { layerColumns, layerGridState, isPreviewLayer, tileAspectRatio ->
+        val isMonthlyOverview = layerColumns >= 5
+        val layerGroups = if (isMonthlyOverview) monthlyMediaGroups else mediaGroups
+        val headerKeyPrefix = if (isMonthlyOverview) "header_m_" else "header_d_"
+        val targetSize = gridThumbnailTargetSize(layerColumns)
+        val isLayerScrolling by remember(layerGridState) {
+            derivedStateOf { layerGridState.isScrollInProgress || isParentScrolling() }
+        }
+        val effectiveScrolling = if (isPreviewLayer) false else isLayerScrolling
 
-    Box(modifier = modifier.fillMaxSize()) {
         LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Fixed(columns),
-            modifier = Modifier
-                .fillMaxSize()
-                .pinchToZoomGrid(
-                    currentColumns = columns,
-                    gridState = gridState,
-                    onColumnsChanged = onColumnsChanged
-                ),
+            state = layerGridState,
+            columns = GridCells.Fixed(layerColumns),
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 100.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
-            mediaGroups.forEach { group ->
+            layerGroups.forEach { group ->
                 item(
-                    key = "header_${group.dateLabel}",
+                    key = "$headerKeyPrefix${group.dateLabel}",
                     span = { GridItemSpan(maxLineSpan) }
                 ) {
                     DateGroupHeader(
                         label = group.dateLabel,
                         count = group.items.size,
+                        isCompact = isMonthlyOverview,
                         modifier = Modifier.fillMaxWidth()
                     )
                 }
@@ -1264,39 +1287,71 @@ private fun TimelineGrid(
                         onLongClick = { onItemLongClick(mediaItem) },
                         isSelectionMode = isSelectionMode,
                         isSelected = mediaItem.id in selectedIds,
-                        isScrolling = isScrolling,
-                        targetSize = if (columns <= 2) 200 else 160,
-                        modifier = Modifier.aspectRatio(1f)
+                        isScrolling = effectiveScrolling,
+                        forceLoad = isPreviewLayer,
+                        targetSize = targetSize,
+                        modifier = Modifier.aspectRatio(tileAspectRatio)
                     )
                 }
             }
         }
-
-        VerticalFastScrollbar(
-            gridState = gridState,
-            modifier = Modifier.fillMaxSize(),
-            labelProvider = { index ->
-                if (index in flatHeaders.indices) flatHeaders[index] else ""
-            }
-        )
     }
+}
+
+private fun resolveTimelineAnchorIndex(
+    sourceGroups: List<MediaGroup>,
+    targetGroups: List<MediaGroup>,
+    sourceFlatIndex: Int
+): Int {
+    if (sourceGroups === targetGroups || sourceGroups.isEmpty() || targetGroups.isEmpty()) {
+        return sourceFlatIndex.coerceAtLeast(0)
+    }
+    var cursor = 0
+    var anchorMediaId: Long? = null
+    for (group in sourceGroups) {
+        if (sourceFlatIndex == cursor) {
+            anchorMediaId = group.items.firstOrNull()?.id
+            break
+        }
+        cursor++ // section header
+        val groupEnd = cursor + group.items.size
+        if (sourceFlatIndex < groupEnd) {
+            anchorMediaId = group.items[sourceFlatIndex - cursor].id
+            break
+        }
+        cursor = groupEnd
+    }
+    val targetId = anchorMediaId ?: return sourceFlatIndex.coerceAtLeast(0)
+
+    var targetCursor = 0
+    for (group in targetGroups) {
+        targetCursor++ // section header
+        for (i in group.items.indices) {
+            if (group.items[i].id == targetId) {
+                return targetCursor + i
+            }
+        }
+        targetCursor += group.items.size
+    }
+    return sourceFlatIndex.coerceAtLeast(0)
 }
 
 @Composable
 private fun DateGroupHeader(
     label: String,
     count: Int,
+    isCompact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Row(
         modifier = modifier
             .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .padding(horizontal = 16.dp, vertical = if (isCompact) 8.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.titleMedium,
+            style = if (isCompact) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.SemiBold,
             color = MaterialTheme.colorScheme.onBackground,
             modifier = Modifier.weight(1f)
@@ -1326,6 +1381,7 @@ private fun AlbumsGrid(
     onEditGroupAlbums: (UserAlbumGroupUiModel) -> Unit,
     onRenameGroup: (UserAlbumGroupUiModel) -> Unit,
     onDissolveGroup: (UserAlbumGroupUiModel) -> Unit,
+    isParentScrolling: () -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
     if (albums.isEmpty()) {
@@ -1338,10 +1394,8 @@ private fun AlbumsGrid(
         return
     }
 
-    val gridState = rememberLazyGridState(
-        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-    )
-    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
+    val gridState = rememberViewportOnlyLazyGridState()
+    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress || isParentScrolling() } }
 
     Box(modifier = modifier.fillMaxSize()) {
         LazyVerticalGrid(
@@ -1607,15 +1661,18 @@ private fun AlbumCard(
             val cacheKey = "album_cover_${album.id}_${album.coverUri}"
             val imageLoader = context.imageLoader
             val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-            var shouldLoad by remember(cacheKey) {
+            var hasLoadedInViewport by remember(cacheKey) {
                 mutableStateOf(isInMemoryCache || !isScrolling)
             }
-            if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
-                shouldLoad = true
+            val shouldLoad = hasLoadedInViewport || isInMemoryCache || !isScrolling
+            SideEffect {
+                if (shouldLoad && !hasLoadedInViewport) {
+                    hasLoadedInViewport = true
+                }
             }
             DisposableEffect(cacheKey) {
                 onDispose {
-                    shouldLoad = false
+                    hasLoadedInViewport = false
                 }
             }
 
@@ -1766,6 +1823,7 @@ private fun VideosGrid(
     onVideoLongClick: (MediaItem.Video) -> Unit,
     columns: Int = 3,
     onColumnsChanged: (Int) -> Unit = {},
+    isParentScrolling: () -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
     if (videos.isEmpty()) {
@@ -1778,22 +1836,29 @@ private fun VideosGrid(
         return
     }
 
-    val gridState = rememberLazyGridState(
-        prefetchStrategy = remember { LazyGridPrefetchStrategy(nestedPrefetchItemCount = 0) }
-    )
-    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
+    AnimatedPinchGridContainer(
+        currentColumns = columns,
+        onColumnsChanged = onColumnsChanged,
+        minColumns = 2,
+        maxColumns = 7,
+        modifier = modifier.fillMaxSize(),
+        overlayContent = { activeGridState, _ ->
+            VerticalFastScrollbar(
+                gridState = activeGridState,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    ) { layerColumns, layerGridState, isPreviewLayer, tileAspectRatio ->
+        val targetSize = gridThumbnailTargetSize(layerColumns)
+        val isLayerScrolling by remember(layerGridState) {
+            derivedStateOf { layerGridState.isScrollInProgress || isParentScrolling() }
+        }
+        val effectiveScrolling = if (isPreviewLayer) false else isLayerScrolling
 
-    Box(modifier = modifier.fillMaxSize()) {
         LazyVerticalGrid(
-            state = gridState,
-            columns = GridCells.Fixed(columns),
-            modifier = Modifier
-                .fillMaxSize()
-                .pinchToZoomGrid(
-                    currentColumns = columns,
-                    gridState = gridState,
-                    onColumnsChanged = onColumnsChanged
-                ),
+            state = layerGridState,
+            columns = GridCells.Fixed(layerColumns),
+            modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 100.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1808,17 +1873,13 @@ private fun VideosGrid(
                     onLongClick = { onVideoLongClick(video) },
                     isSelectionMode = isSelectionMode,
                     isSelected = video.id in selectedIds,
-                    isScrolling = isScrolling,
-                    targetSize = if (columns <= 2) 200 else 160,
-                    modifier = Modifier.aspectRatio(1f)
+                    isScrolling = effectiveScrolling,
+                    forceLoad = isPreviewLayer,
+                    targetSize = targetSize,
+                    modifier = Modifier.aspectRatio(tileAspectRatio)
                 )
             }
         }
-
-        VerticalFastScrollbar(
-            gridState = gridState,
-            modifier = Modifier.fillMaxSize()
-        )
     }
 }
 

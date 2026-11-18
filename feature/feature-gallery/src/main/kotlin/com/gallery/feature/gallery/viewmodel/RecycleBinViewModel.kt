@@ -46,11 +46,11 @@ class RecycleBinViewModel @Inject constructor(
     val uiState: StateFlow<RecycleBinUiState> = _uiState.asStateFlow()
 
     val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch {
-            setDefaultGridColumnsUseCase(columns.coerceIn(2, 5))
+            setDefaultGridColumnsUseCase(columns.coerceIn(2, 7))
         }
     }
 

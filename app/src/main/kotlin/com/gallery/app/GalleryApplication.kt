@@ -15,7 +15,7 @@ class GalleryApplication : Application(), ImageLoaderFactory {
         return ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.20)
+                    .maxSizePercent(0.15)
                     .build()
             }
             .diskCache {

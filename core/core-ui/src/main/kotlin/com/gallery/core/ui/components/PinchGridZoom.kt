@@ -47,7 +47,7 @@ private const val GRID_PINCH_ZOOM_OUT_THRESHOLD = 0.78f
 fun Modifier.pinchToZoomGrid(
     currentColumns: Int,
     minColumns: Int = 2,
-    maxColumns: Int = 5,
+    maxColumns: Int = 7,
     enabled: Boolean = true,
     gridState: LazyGridState? = null,
     onColumnsChanged: (Int) -> Unit

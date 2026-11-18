@@ -29,8 +29,9 @@ sealed class Screen(val route: String) {
     object Vault : Screen("vault")
     object Settings : Screen("settings")
     object RecycleBin : Screen("recycle_bin")
-    object Editor : Screen("editor/{mediaUri}") {
-        fun createRoute(uri: String) = "editor/${java.net.URLEncoder.encode(uri, "UTF-8")}"
+    object Editor : Screen("editor/{mediaUri}?isVideo={isVideo}") {
+        fun createRoute(uri: String, isVideo: Boolean = false) =
+            "editor/${java.net.URLEncoder.encode(uri, "UTF-8")}?isVideo=$isVideo"
     }
 }
 
@@ -94,8 +95,8 @@ fun GalleryNavGraph(navController: NavHostController) {
                 isVideo = backStackEntry.arguments?.getBoolean("isVideo") ?: false,
                 albumId = backStackEntry.arguments?.getLong("albumId") ?: -1L,
                 onBack = { navController.popBackStack() },
-                onEdit = { uri ->
-                    navController.navigate(Screen.Editor.createRoute(uri))
+                onEdit = { uri, isVideo ->
+                    navController.navigate(Screen.Editor.createRoute(uri, isVideo))
                 }
             )
         }
@@ -241,7 +242,11 @@ fun GalleryNavGraph(navController: NavHostController) {
         composable(
             route = Screen.Editor.route,
             arguments = listOf(
-                navArgument("mediaUri") { type = NavType.StringType }
+                navArgument("mediaUri") { type = NavType.StringType },
+                navArgument("isVideo") {
+                    type = NavType.BoolType
+                    defaultValue = false
+                }
             ),
             enterTransition = {
                 slideInVertically(
@@ -264,8 +269,10 @@ fun GalleryNavGraph(navController: NavHostController) {
         ) { backStackEntry ->
             val encodedUri = backStackEntry.arguments?.getString("mediaUri") ?: ""
             val uri = java.net.URLDecoder.decode(encodedUri, "UTF-8")
+            val isVideo = backStackEntry.arguments?.getBoolean("isVideo") ?: false
             EditorScreen(
                 mediaUriString = uri,
+                isVideo = isVideo,
                 onBack = { navController.popBackStack() }
             )
         }

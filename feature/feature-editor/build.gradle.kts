@@ -35,6 +35,10 @@ dependencies {
     implementation(libs.lifecycle.viewmodel.compose)
     implementation(libs.lifecycle.runtime.compose)
     implementation(libs.ucrop)
+    implementation(libs.exoplayer)
+    implementation(libs.exoplayer.ui)
+    implementation(libs.media3.transformer)
+    implementation(libs.media3.effect)
     implementation(libs.coroutines.android)
     debugImplementation(libs.compose.ui.tooling)
 }

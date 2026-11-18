@@ -59,6 +59,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -72,6 +73,7 @@ data class MediaGroup(
 private data class GalleryLoadedData(
     val media: List<MediaItem>,
     val mediaGroups: List<MediaGroup>,
+    val monthlyMediaGroups: List<MediaGroup>,
     val albums: List<Album>,
     val albumGroups: List<AlbumGroupSection>,
     val userAlbumGroups: List<UserAlbumGroupUiModel>,
@@ -99,6 +101,7 @@ enum class GalleryTab { TIMELINE, ALBUMS, VIDEOS }
 data class GalleryUiState(
     val allMedia: List<MediaItem> = emptyList(),
     val mediaGroups: List<MediaGroup> = emptyList(),
+    val monthlyMediaGroups: List<MediaGroup> = emptyList(),
     val albums: List<Album> = emptyList(),
     val albumGroups: List<AlbumGroupSection> = emptyList(),
     val userAlbumGroups: List<UserAlbumGroupUiModel> = emptyList(),
@@ -217,11 +220,11 @@ class GalleryViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
     val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch {
-            setDefaultGridColumnsUseCase(columns.coerceIn(2, 5))
+            setDefaultGridColumnsUseCase(columns.coerceIn(2, 7))
         }
     }
     val selectedTab = MutableStateFlow(GalleryTab.TIMELINE)
@@ -283,12 +286,14 @@ class GalleryViewModel @Inject constructor(
 
                 val groupedAlbumIds = userGroupUiModels.flatMap { it.albums.map { alb -> alb.id } }.toSet()
                 val ungrouped = albums.filter { it.id !in groupedAlbumIds }
-                val mediaGroups = media.groupByDate()
+                val mediaGroups = media.groupByDay()
+                val monthlyMediaGroups = media.groupByMonth()
                 val videos = media.filterIsInstance<MediaItem.Video>()
 
                 GalleryLoadedData(
                     media = media,
                     mediaGroups = mediaGroups,
+                    monthlyMediaGroups = monthlyMediaGroups,
                     albums = albums,
                     albumGroups = sections,
                     userAlbumGroups = userGroupUiModels,
@@ -307,6 +312,7 @@ class GalleryViewModel @Inject constructor(
                         current.copy(
                             allMedia = data.media,
                             mediaGroups = data.mediaGroups,
+                            monthlyMediaGroups = data.monthlyMediaGroups,
                             albums = data.albums,
                             albumGroups = data.albumGroups,
                             userAlbumGroups = data.userAlbumGroups,
@@ -811,7 +817,8 @@ class GalleryViewModel @Inject constructor(
                 }
                 current.copy(
                     allMedia = remainingMedia,
-                    mediaGroups = remainingMedia.groupByDate(),
+                    mediaGroups = remainingMedia.groupByDay(),
+                    monthlyMediaGroups = remainingMedia.groupByMonth(),
                     albums = remainingAlbums,
                     videos = remainingMedia.filterIsInstance<MediaItem.Video>(),
                     isPerformingBatchAction = false,
@@ -835,7 +842,9 @@ class GalleryViewModel @Inject constructor(
 
     companion object {
         private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-        private val monthYearFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("MMMM yyyy", Locale.getDefault())
+        private val dayMonthFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM", Locale.getDefault())
+        private val dayMonthYearFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault())
+        private val monthYearFormatter: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM yyyy", Locale.getDefault())
     }
 
     fun moveItemsToRecycleBin(items: List<MediaItem>) {
@@ -862,7 +871,8 @@ class GalleryViewModel @Inject constructor(
             }
             current.copy(
                 allMedia = remainingMedia,
-                mediaGroups = remainingMedia.groupByDate(),
+                mediaGroups = remainingMedia.groupByDay(),
+                monthlyMediaGroups = remainingMedia.groupByMonth(),
                 albums = remainingAlbums,
                 videos = remainingMedia.filterIsInstance<MediaItem.Video>(),
                 selectedItemIds = emptySet(),
@@ -965,7 +975,8 @@ class GalleryViewModel @Inject constructor(
                 }
                 current.copy(
                     allMedia = remainingMedia,
-                    mediaGroups = remainingMedia.groupByDate(),
+                    mediaGroups = remainingMedia.groupByDay(),
+                    monthlyMediaGroups = remainingMedia.groupByMonth(),
                     albums = remainingAlbums,
                     videos = remainingMedia.filterIsInstance<MediaItem.Video>(),
                     isPerformingBatchAction = false,
@@ -1175,7 +1186,29 @@ class GalleryViewModel @Inject constructor(
         moveItemsToAlbum(items, targetAlbum, newAlbumName, sourceAlbumId)
     }
 
-    private fun List<MediaItem>.groupByDate(): List<MediaGroup> {
+    private fun List<MediaItem>.groupByDay(): List<MediaGroup> {
+        val zoneId = ZoneId.systemDefault()
+        val today = LocalDate.now(zoneId)
+        val yesterday = today.minusDays(1)
+        return groupBy { item ->
+            val date = Instant.ofEpochSecond(item.dateAdded.coerceAtLeast(0L))
+                .atZone(zoneId)
+                .toLocalDate()
+            when (date) {
+                today -> "Today"
+                yesterday -> "Yesterday"
+                else -> if (date.year == today.year) {
+                    dayMonthFormatter.format(date)
+                } else {
+                    dayMonthYearFormatter.format(date)
+                }
+            }
+        }.map { (label, items) ->
+            MediaGroup(dateLabel = label, items = items)
+        }
+    }
+
+    private fun List<MediaItem>.groupByMonth(): List<MediaGroup> {
         val zoneId = ZoneId.systemDefault()
         return groupBy { item ->
             val instant = Instant.ofEpochSecond(item.dateAdded.coerceAtLeast(0L))

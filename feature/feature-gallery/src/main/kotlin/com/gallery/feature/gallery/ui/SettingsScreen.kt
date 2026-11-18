@@ -184,38 +184,52 @@ fun SettingsScreen(
                         }
 
                         Text(
-                            text = "Choose your preferred color theme or match the system appearance.",
+                            text = "Choose your preferred color theme, pure pitch-black AMOLED mode, or match the system appearance.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
                         Spacer(Modifier.height(4.dp))
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            ThemeOptionButton(
-                                label = "System",
-                                icon = Icons.Outlined.BrightnessAuto,
-                                isSelected = themeMode == ThemeMode.SYSTEM,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setThemeMode(ThemeMode.SYSTEM) }
-                            )
-                            ThemeOptionButton(
-                                label = "Dark",
-                                icon = Icons.Outlined.DarkMode,
-                                isSelected = themeMode == ThemeMode.DARK,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setThemeMode(ThemeMode.DARK) }
-                            )
-                            ThemeOptionButton(
-                                label = "Light",
-                                icon = Icons.Outlined.LightMode,
-                                isSelected = themeMode == ThemeMode.LIGHT,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setThemeMode(ThemeMode.LIGHT) }
-                            )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ThemeOptionButton(
+                                    label = "System",
+                                    icon = Icons.Outlined.BrightnessAuto,
+                                    isSelected = themeMode == ThemeMode.SYSTEM,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setThemeMode(ThemeMode.SYSTEM) }
+                                )
+                                ThemeOptionButton(
+                                    label = "Light",
+                                    icon = Icons.Outlined.LightMode,
+                                    isSelected = themeMode == ThemeMode.LIGHT,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setThemeMode(ThemeMode.LIGHT) }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ThemeOptionButton(
+                                    label = "Dark",
+                                    icon = Icons.Outlined.DarkMode,
+                                    isSelected = themeMode == ThemeMode.DARK,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setThemeMode(ThemeMode.DARK) }
+                                )
+                                ThemeOptionButton(
+                                    label = "AMOLED",
+                                    icon = Icons.Outlined.Contrast,
+                                    isSelected = themeMode == ThemeMode.AMOLED,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setThemeMode(ThemeMode.AMOLED) }
+                                )
+                            }
                         }
                     }
 
@@ -240,7 +254,7 @@ fun SettingsScreen(
                         }
 
                         Text(
-                            text = "Choose how photos and videos are organized by default, or pinch in/out on any media grid (2–5 columns).",
+                            text = "Choose how photos and videos are organized by default, or pinch in/out on any media grid (2–7 columns).",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -272,18 +286,37 @@ fun SettingsScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 ThemeOptionButton(
-                                    label = "4 Columns (Medium)",
+                                    label = "4 Columns (Default)",
                                     icon = Icons.Outlined.GridOn,
                                     isSelected = gridColumns == 4,
                                     modifier = Modifier.weight(1f),
                                     onClick = { viewModel.setDefaultGridColumns(4) }
                                 )
                                 ThemeOptionButton(
-                                    label = "5 Columns (Compact)",
+                                    label = "5 Columns (Dense)",
                                     icon = Icons.Outlined.GridOn,
                                     isSelected = gridColumns == 5,
                                     modifier = Modifier.weight(1f),
                                     onClick = { viewModel.setDefaultGridColumns(5) }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ThemeOptionButton(
+                                    label = "6 Columns (Compact)",
+                                    icon = Icons.Outlined.GridOn,
+                                    isSelected = gridColumns == 6,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setDefaultGridColumns(6) }
+                                )
+                                ThemeOptionButton(
+                                    label = "7 Columns (Overview)",
+                                    icon = Icons.Outlined.GridOn,
+                                    isSelected = gridColumns == 7,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setDefaultGridColumns(7) }
                                 )
                             }
                         }

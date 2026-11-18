@@ -21,6 +21,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,20 +55,22 @@ fun MediaThumbnail(
     isSelectionMode: Boolean = false,
     isSelected: Boolean = false,
     isScrolling: Boolean = false,
-    targetSize: Int = 160
+    forceLoad: Boolean = false,
+    targetSize: Int = 150
 ) {
+    val isCompactTile = targetSize <= 120
     val cellModifier = if (isSelectionMode) {
         val animatedPadding by animateDpAsState(
-            targetValue = if (isSelected) 4.dp else 0.dp,
+            targetValue = if (isSelected) (if (isCompactTile) 2.dp else 4.dp) else 0.dp,
             label = "selectedPadding"
         )
-        val shape = RoundedCornerShape(if (isSelected) 8.dp else 0.dp)
+        val shape = RoundedCornerShape(if (isSelected) (if (isCompactTile) 4.dp else 8.dp) else 0.dp)
         modifier
             .padding(animatedPadding)
             .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .border(
-                width = if (isSelected) 2.5.dp else 0.dp,
+                width = if (isSelected) (if (isCompactTile) 1.5.dp else 2.5.dp) else 0.dp,
                 color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
                 shape = shape
             )
@@ -83,32 +86,42 @@ fun MediaThumbnail(
         )
     ) {
         val context = LocalContext.current
+        // Use the exact same memoryCacheKey across all column counts so incoming pinch grids hit
+        // RAM synchronously on frame 1 with zero placeholder flashes or disk decode stalls.
         val cacheKey = "thumb_${item.id}"
         val imageLoader = context.imageLoader
         val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
-        var shouldLoad by remember(cacheKey) {
-            mutableStateOf(isInMemoryCache || !isScrolling)
+        var hasLoadedInViewport by remember(cacheKey) {
+            mutableStateOf(forceLoad || isInMemoryCache || !isScrolling)
         }
-        if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
-            shouldLoad = true
+        val shouldLoad = forceLoad || hasLoadedInViewport || isInMemoryCache || !isScrolling
+        SideEffect {
+            if (shouldLoad && !hasLoadedInViewport) {
+                hasLoadedInViewport = true
+            }
         }
         DisposableEffect(cacheKey) {
             onDispose {
-                shouldLoad = false
+                hasLoadedInViewport = false
             }
         }
 
         if (shouldLoad) {
-            val thumbnailRequest = remember(item.id, item.uri, item.filePath, targetSize) {
+            // While mounted as an incoming pinch preview layer (forceLoad = true), request 110px
+            // so any already-cached thumbnail in RAM (110/150/200/260px) satisfies Coil's size
+            // check with 0 disk decodes; once promoted to active, upgrade sharpness seamlessly.
+            val decodeSize = if (forceLoad) 110 else targetSize
+            val thumbnailRequest = remember(item.id, item.uri, item.filePath, decodeSize) {
                 ImageRequest.Builder(context)
                     .data(item.filePath?.let { File(it) }?.takeIf { it.canRead() } ?: item.uri)
-                    .size(width = targetSize, height = targetSize)
+                    .size(width = decodeSize, height = decodeSize)
                     .precision(Precision.INEXACT)
                     .scale(Scale.FILL)
                     .bitmapConfig(Bitmap.Config.RGB_565)
                     .allowHardware(true)
                     .memoryCacheKey(cacheKey)
                     .diskCacheKey(cacheKey)
+                    .placeholderMemoryCacheKey(cacheKey)
                     .crossfade(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
@@ -134,15 +147,16 @@ fun MediaThumbnail(
 
         // Selection mode checkbox indicator (top-end)
         if (isSelectionMode) {
+            val checkSize = if (isCompactTile) 18.dp else 24.dp
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(6.dp)
+                    .padding(if (isCompactTile) 3.dp else 6.dp)
             ) {
                 if (isSelected) {
                     Box(
                         modifier = Modifier
-                            .size(24.dp)
+                            .size(checkSize)
                             .background(MaterialTheme.colorScheme.primary, CircleShape)
                             .border(1.5.dp, Color.White, CircleShape),
                         contentAlignment = Alignment.Center
@@ -151,13 +165,13 @@ fun MediaThumbnail(
                             imageVector = Icons.Filled.Check,
                             contentDescription = "Selected",
                             tint = MaterialTheme.colorScheme.onPrimary,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(if (isCompactTile) 12.dp else 16.dp)
                         )
                     }
                 } else {
                     Box(
                         modifier = Modifier
-                            .size(24.dp)
+                            .size(checkSize)
                             .background(Color.Black.copy(alpha = 0.35f), CircleShape)
                             .border(1.5.dp, Color.White.copy(alpha = 0.9f), CircleShape)
                     )
@@ -170,16 +184,16 @@ fun MediaThumbnail(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
-                    .padding(5.dp)
+                    .padding(if (isCompactTile) 2.5.dp else 5.dp)
                     .background(Color.Black.copy(alpha = 0.5f), CircleShape)
-                    .padding(3.5.dp),
+                    .padding(if (isCompactTile) 2.dp else 3.5.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Filled.Favorite,
                     contentDescription = "Favorited",
                     tint = Color(0xFFFF3B30),
-                    modifier = Modifier.size(12.dp)
+                    modifier = Modifier.size(if (isCompactTile) 9.dp else 12.dp)
                 )
             }
         }
@@ -189,24 +203,27 @@ fun MediaThumbnail(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(4.dp)
+                    .padding(if (isCompactTile) 2.dp else 4.dp)
             ) {
                 Box(
                     modifier = Modifier
                         .background(Color.Black.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 5.dp, vertical = 2.dp)
+                        .padding(
+                            horizontal = if (isCompactTile) 3.dp else 5.dp,
+                            vertical = if (isCompactTile) 1.dp else 2.dp
+                        )
                 ) {
                     Text(
                         text = item.duration.formatDuration(),
                         color = Color.White,
-                        fontSize = 11.sp,
+                        fontSize = if (isCompactTile) 8.5.sp else 11.sp,
                         fontWeight = FontWeight.Medium
                     )
                 }
             }
 
-            // Play icon (hide if selected to avoid clutter)
-            if (!isSelected) {
+            // Play icon (hide if selected or ultra-compact overview to avoid clutter)
+            if (!isSelected && !isCompactTile) {
                 Icon(
                     imageVector = Icons.Filled.PlayArrow,
                     contentDescription = "Video",

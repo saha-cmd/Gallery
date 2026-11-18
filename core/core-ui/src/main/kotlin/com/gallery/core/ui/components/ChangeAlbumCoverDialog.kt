@@ -1,5 +1,6 @@
 package com.gallery.core.ui.components
 
+import android.graphics.Bitmap
 import android.net.Uri
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
@@ -16,6 +17,13 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -25,7 +33,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.imageLoader
+import coil.memory.MemoryCache
+import coil.request.CachePolicy
 import coil.request.ImageRequest
+import coil.size.Precision
+import coil.size.Scale
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.MediaItem
 
@@ -80,7 +93,10 @@ fun ChangeAlbumCoverDialog(
                         )
                     }
                 } else {
+                    val gridState = rememberViewportOnlyLazyGridState()
+                    val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress } }
                     LazyVerticalGrid(
+                        state = gridState,
                         columns = GridCells.Fixed(3),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -90,11 +106,30 @@ fun ChangeAlbumCoverDialog(
                     ) {
                         items(album.items, key = { it.id }) { item ->
                             val isCurrentCover = (item.uri == album.coverUri || item.uri.toString() == album.coverUri.toString())
+                            val cacheKey = "thumb_${item.id}"
+                            val imageLoader = context.imageLoader
+                            val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
+                            var hasLoadedInViewport by remember(cacheKey) {
+                                mutableStateOf(isInMemoryCache || !isScrolling)
+                            }
+                            val shouldLoad = hasLoadedInViewport || isInMemoryCache || !isScrolling
+                            SideEffect {
+                                if (shouldLoad && !hasLoadedInViewport) {
+                                    hasLoadedInViewport = true
+                                }
+                            }
+                            DisposableEffect(cacheKey) {
+                                onDispose {
+                                    hasLoadedInViewport = false
+                                }
+                            }
+
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .aspectRatio(1f)
                                     .clip(MaterialTheme.shapes.small)
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
                                     .then(
                                         if (isCurrentCover) {
                                             Modifier.border(
@@ -107,16 +142,29 @@ fun ChangeAlbumCoverDialog(
                                     )
                                     .clickable { onSelectCover(item.uri) }
                             ) {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(context)
-                                        .data(item.uri)
-                                        .size(160, 160)
-                                        .crossfade(true)
-                                        .build(),
-                                    contentDescription = item.name,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
+                                if (shouldLoad) {
+                                    val thumbRequest = remember(item.id, item.uri) {
+                                        ImageRequest.Builder(context)
+                                            .data(item.uri)
+                                            .size(160, 160)
+                                            .precision(Precision.INEXACT)
+                                            .scale(Scale.FILL)
+                                            .bitmapConfig(Bitmap.Config.RGB_565)
+                                            .allowHardware(true)
+                                            .memoryCacheKey(cacheKey)
+                                            .diskCacheKey(cacheKey)
+                                            .crossfade(false)
+                                            .memoryCachePolicy(CachePolicy.ENABLED)
+                                            .diskCachePolicy(CachePolicy.ENABLED)
+                                            .build()
+                                    }
+                                    AsyncImage(
+                                        model = thumbRequest,
+                                        contentDescription = item.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
 
                                 if (item is MediaItem.Video) {
                                     Box(

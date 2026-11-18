@@ -16,9 +16,10 @@ import com.gallery.core.security.auth.AuthResult
 import com.gallery.core.security.auth.BiometricAuthManager
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -91,11 +92,11 @@ class VaultViewModel @Inject constructor(
     val pinState: StateFlow<PinState> = _pinState.asStateFlow()
 
     val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch {
-            setDefaultGridColumnsUseCase(columns.coerceIn(2, 5))
+            setDefaultGridColumnsUseCase(columns.coerceIn(2, 7))
         }
     }
 
@@ -249,30 +250,34 @@ class VaultViewModel @Inject constructor(
         }
     }
 
-    private val pendingPreviewItemIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    private val activePreviewJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     fun requestPreview(item: VaultItem) {
         if (item.id in _vaultState.value.previewFiles ||
             item.id in _vaultState.value.corruptedItemIds ||
-            !pendingPreviewItemIds.add(item.id)) {
+            activePreviewJobs.containsKey(item.id)) {
             return
         }
 
-        viewModelScope.launch(Dispatchers.IO) {
+        val job = viewModelScope.launch(Dispatchers.IO) {
+            val currentJob = coroutineContext[Job]
             try {
                 // 1. Check if pre-cached thumbnail file exists on disk (loaded on-demand by Coil's bounded LRU cache)
                 val cachedThumb = vaultRepository.getThumbnailFile(item)
                 if (cachedThumb != null && cachedThumb.exists() && cachedThumb.length() > 0) {
-                    _vaultState.update { current ->
-                        current.copy(
-                            previewFiles = current.previewFiles + (item.id to cachedThumb)
-                        )
+                    if (isActive) {
+                        _vaultState.update { current ->
+                            current.copy(
+                                previewFiles = current.previewFiles + (item.id to cachedThumb)
+                            )
+                        }
                     }
                     return@launch
                 }
 
                 // 2. Decrypt to temp file and pre-cache thumbnail (160x160, RGB_565), recycling temp bitmap immediately
                 vaultRepository.getDecryptedTempFile(item).onSuccess { file ->
+                    if (!isActive) return@onSuccess
                     val thumbDir = File(getApplication<Application>().filesDir, "vault/thumbnails").apply { mkdirs() }
                     val thumbFile = File(thumbDir, "${item.id}.jpg")
                     if (item.isVideo) {
@@ -329,19 +334,38 @@ class VaultViewModel @Inject constructor(
                         }
                     }
 
-                    _vaultState.update { current ->
-                        current.copy(
-                            previewFiles = current.previewFiles + (item.id to (if (thumbFile.exists()) thumbFile else file))
-                        )
+                    if (isActive) {
+                        _vaultState.update { current ->
+                            current.copy(
+                                previewFiles = current.previewFiles + (item.id to (if (thumbFile.exists()) thumbFile else file))
+                            )
+                        }
                     }
                 }.onFailure { err ->
-                    android.util.Log.e("VaultViewModel", "Decryption failed for item ${item.id}", err)
-                    _vaultState.update { current ->
-                        current.copy(corruptedItemIds = current.corruptedItemIds + item.id)
+                    if (isActive) {
+                        android.util.Log.e("VaultViewModel", "Decryption failed for item ${item.id}", err)
+                        _vaultState.update { current ->
+                            current.copy(corruptedItemIds = current.corruptedItemIds + item.id)
+                        }
                     }
                 }
             } finally {
-                pendingPreviewItemIds.remove(item.id)
+                if (currentJob != null) {
+                    activePreviewJobs.remove(item.id, currentJob)
+                }
+            }
+        }
+        val existing = activePreviewJobs.putIfAbsent(item.id, job)
+        if (existing != null) {
+            job.cancel()
+        }
+    }
+
+    fun releasePreview(itemId: String) {
+        activePreviewJobs.remove(itemId)?.cancel()
+        if (itemId in _vaultState.value.previewFiles) {
+            _vaultState.update { current ->
+                current.copy(previewFiles = current.previewFiles - itemId)
             }
         }
     }
