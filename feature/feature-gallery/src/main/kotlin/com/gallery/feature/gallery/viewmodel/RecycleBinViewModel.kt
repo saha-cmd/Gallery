@@ -7,8 +7,10 @@ import com.gallery.core.domain.model.RecycleBinItem
 import com.gallery.core.domain.usecase.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -35,11 +37,22 @@ class RecycleBinViewModel @Inject constructor(
     private val deletePermanentlyUseCase: DeletePermanentlyUseCase,
     private val emptyRecycleBinUseCase: EmptyRecycleBinUseCase,
     private val getPendingPermanentDeleteIntentSenderUseCase: GetPendingPermanentDeleteIntentSenderUseCase,
-    private val finalizePermanentDeleteUseCase: FinalizePermanentDeleteUseCase
+    private val finalizePermanentDeleteUseCase: FinalizePermanentDeleteUseCase,
+    getDefaultGridColumnsUseCase: GetDefaultGridColumnsUseCase,
+    private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(RecycleBinUiState())
     val uiState: StateFlow<RecycleBinUiState> = _uiState.asStateFlow()
+
+    val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+
+    fun setGridColumns(columns: Int) {
+        viewModelScope.launch {
+            setDefaultGridColumnsUseCase(columns.coerceIn(2, 5))
+        }
+    }
 
     init {
         loadRecycleBin()

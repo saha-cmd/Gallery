@@ -15,8 +15,7 @@ class GalleryApplication : Application(), ImageLoaderFactory {
         return ImageLoader.Builder(this)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.35)
-                    .strongReferencesEnabled(true)
+                    .maxSizePercent(0.20)
                     .build()
             }
             .diskCache {
@@ -28,7 +27,7 @@ class GalleryApplication : Application(), ImageLoaderFactory {
             .components {
                 add(VideoFrameDecoder.Factory()) // Video thumbnail frames
             }
-            .crossfade(true)
+            .crossfade(false)
             .respectCacheHeaders(false) // MediaStore URIs don't use HTTP caching
             .build()
     }

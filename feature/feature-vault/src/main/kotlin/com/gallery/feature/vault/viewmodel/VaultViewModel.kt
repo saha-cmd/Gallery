@@ -8,9 +8,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallery.core.domain.model.VaultItem
 import com.gallery.core.domain.repository.VaultRepository
-import com.gallery.core.ui.util.LoadedThumbnailRegistry
+import com.gallery.core.domain.usecase.GetDefaultGridColumnsUseCase
 import com.gallery.core.domain.usecase.GetVaultItemsUseCase
 import com.gallery.core.domain.usecase.RestoreFromVaultUseCase
+import com.gallery.core.domain.usecase.SetDefaultGridColumnsUseCase
 import com.gallery.core.security.auth.AuthResult
 import com.gallery.core.security.auth.BiometricAuthManager
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -54,7 +55,6 @@ data class VaultUiState(
     val error: String? = null,
     val infoMessage: String? = null,
     val previewFiles: Map<String, File> = emptyMap(),
-    val previewBitmaps: Map<String, Bitmap> = emptyMap(),
     val corruptedItemIds: Set<String> = emptySet(),
     val activeViewingItem: VaultItem? = null,
     val activeViewingFile: File? = null,
@@ -76,7 +76,9 @@ class VaultViewModel @Inject constructor(
     private val getVaultItemsUseCase: GetVaultItemsUseCase,
     private val restoreFromVaultUseCase: RestoreFromVaultUseCase,
     private val vaultRepository: VaultRepository,
-    val biometricAuthManager: BiometricAuthManager
+    val biometricAuthManager: BiometricAuthManager,
+    getDefaultGridColumnsUseCase: GetDefaultGridColumnsUseCase,
+    private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase
 ) : AndroidViewModel(application) {
 
     private val _authState = MutableStateFlow<VaultAuthState>(VaultAuthState.Idle)
@@ -87,6 +89,15 @@ class VaultViewModel @Inject constructor(
 
     private val _pinState = MutableStateFlow(PinState())
     val pinState: StateFlow<PinState> = _pinState.asStateFlow()
+
+    val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+
+    fun setGridColumns(columns: Int) {
+        viewModelScope.launch {
+            setDefaultGridColumnsUseCase(columns.coerceIn(2, 5))
+        }
+    }
 
     init {
         checkPinStatus()
@@ -241,8 +252,7 @@ class VaultViewModel @Inject constructor(
     private val pendingPreviewItemIds = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     fun requestPreview(item: VaultItem) {
-        if (item.id in _vaultState.value.previewBitmaps ||
-            item.id in _vaultState.value.previewFiles ||
+        if (item.id in _vaultState.value.previewFiles ||
             item.id in _vaultState.value.corruptedItemIds ||
             !pendingPreviewItemIds.add(item.id)) {
             return
@@ -250,34 +260,28 @@ class VaultViewModel @Inject constructor(
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                // 1. Check if pre-cached thumbnail file exists (instant load)
+                // 1. Check if pre-cached thumbnail file exists on disk (loaded on-demand by Coil's bounded LRU cache)
                 val cachedThumb = vaultRepository.getThumbnailFile(item)
                 if (cachedThumb != null && cachedThumb.exists() && cachedThumb.length() > 0) {
-                    val options = BitmapFactory.Options().apply {
-                        inPreferredConfig = Bitmap.Config.RGB_565
+                    _vaultState.update { current ->
+                        current.copy(
+                            previewFiles = current.previewFiles + (item.id to cachedThumb)
+                        )
                     }
-                    val bmp = BitmapFactory.decodeFile(cachedThumb.absolutePath, options)
-                    if (bmp != null) {
-                        LoadedThumbnailRegistry.markLoaded("vault_thumb_${item.id}")
-                        _vaultState.update { current ->
-                            current.copy(
-                                previewBitmaps = current.previewBitmaps + (item.id to bmp),
-                                previewFiles = current.previewFiles + (item.id to cachedThumb)
-                            )
-                        }
-                        return@launch
-                    }
+                    return@launch
                 }
 
-                // 2. Decrypt to temp file and pre-cache thumbnail (160x160, RGB_565)
+                // 2. Decrypt to temp file and pre-cache thumbnail (160x160, RGB_565), recycling temp bitmap immediately
                 vaultRepository.getDecryptedTempFile(item).onSuccess { file ->
                     val thumbDir = File(getApplication<Application>().filesDir, "vault/thumbnails").apply { mkdirs() }
                     val thumbFile = File(thumbDir, "${item.id}.jpg")
-                    val bitmap: Bitmap? = if (item.isVideo) {
+                    if (item.isVideo) {
+                        var retriever: MediaMetadataRetriever? = null
+                        var frame: Bitmap? = null
                         try {
-                            val retriever = MediaMetadataRetriever()
+                            retriever = MediaMetadataRetriever()
                             retriever.setDataSource(file.absolutePath)
-                            val frame = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
+                            frame = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
                                 retriever.getScaledFrameAtTime(
                                     1_000_000,
                                     MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
@@ -288,15 +292,19 @@ class VaultViewModel @Inject constructor(
                                 retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
                                     ?: retriever.frameAtTime
                             }
-                            retriever.release()
-                            frame?.also {
+                            frame?.let {
                                 thumbFile.outputStream().use { out -> it.compress(Bitmap.CompressFormat.JPEG, 80, out) }
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("VaultViewModel", "Video frame extraction error", e)
-                            null
+                        } finally {
+                            frame?.recycle()
+                            try {
+                                retriever?.release()
+                            } catch (_: Exception) {}
                         }
                     } else {
+                        var decoded: Bitmap? = null
                         try {
                             val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                             BitmapFactory.decodeFile(file.absolutePath, options)
@@ -310,23 +318,20 @@ class VaultViewModel @Inject constructor(
                                 inSampleSize = sampleSize
                                 inPreferredConfig = Bitmap.Config.RGB_565
                             }
-                            val decoded = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
-                            decoded?.also {
+                            decoded = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+                            decoded?.let {
                                 thumbFile.outputStream().use { out -> it.compress(Bitmap.CompressFormat.JPEG, 80, out) }
                             }
                         } catch (e: Exception) {
                             android.util.Log.e("VaultViewModel", "Photo decode error", e)
-                            null
+                        } finally {
+                            decoded?.recycle()
                         }
                     }
 
-                    if (bitmap != null) {
-                        LoadedThumbnailRegistry.markLoaded("vault_thumb_${item.id}")
-                    }
                     _vaultState.update { current ->
                         current.copy(
-                            previewFiles = current.previewFiles + (item.id to (if (thumbFile.exists()) thumbFile else file)),
-                            previewBitmaps = if (bitmap != null) current.previewBitmaps + (item.id to bitmap) else current.previewBitmaps
+                            previewFiles = current.previewFiles + (item.id to (if (thumbFile.exists()) thumbFile else file))
                         )
                     }
                 }.onFailure { err ->
@@ -412,7 +417,6 @@ class VaultViewModel @Inject constructor(
                     it.copy(
                         isLoading = false,
                         previewFiles = it.previewFiles - item.id,
-                        previewBitmaps = it.previewBitmaps - item.id,
                         decryptedFiles = it.decryptedFiles - item.id,
                         corruptedItemIds = it.corruptedItemIds - item.id,
                         infoMessage = "${item.originalName} taken out of Secure Folder and restored to Gallery"
@@ -473,7 +477,6 @@ class VaultViewModel @Inject constructor(
                     activeViewingItem = nextItem,
                     activeViewingFile = if (nextItem != null) it.decryptedFiles[nextItem.id] else null,
                     previewFiles = it.previewFiles - item.id,
-                    previewBitmaps = it.previewBitmaps - item.id,
                     decryptedFiles = it.decryptedFiles - item.id,
                     corruptedItemIds = it.corruptedItemIds - item.id,
                     infoMessage = "${item.originalName} removed from Vault"

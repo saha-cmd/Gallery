@@ -35,6 +35,7 @@ import com.gallery.core.ui.components.MediaThumbnail
 import com.gallery.core.ui.components.MoveToAlbumDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.VerticalFastScrollbar
+import com.gallery.core.ui.components.pinchToZoomGrid
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -60,6 +61,7 @@ fun AlbumDetailScreen(
     onRetryMoveAfterPermission: () -> Unit = {},
     onClearPendingMoveIntent: () -> Unit = {},
     columnCount: Int = 3,
+    onColumnCountChanged: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -280,7 +282,13 @@ fun AlbumDetailScreen(
                         contentPadding = PaddingValues(2.dp),
                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                         verticalArrangement = Arrangement.spacedBy(2.dp),
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .pinchToZoomGrid(
+                                currentColumns = columnCount,
+                                gridState = gridState,
+                                onColumnsChanged = onColumnCountChanged
+                            )
                     ) {
                         items(album.items, key = { it.id }) { mediaItem ->
                             MediaThumbnail(
@@ -298,7 +306,7 @@ fun AlbumDetailScreen(
                                 isSelectionMode = isSelectionMode,
                                 isSelected = mediaItem.id in selectedIds,
                                 isScrolling = isScrolling,
-                                targetSize = if (columnCount <= 2) 180 else 160,
+                                targetSize = if (columnCount <= 2) 200 else 160,
                                 modifier = Modifier.aspectRatio(1f)
                             )
                         }

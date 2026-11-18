@@ -39,6 +39,7 @@ import com.gallery.core.domain.usecase.RemoveItemsFromCustomAlbumUseCase
 import com.gallery.core.domain.usecase.RenameCustomAlbumUseCase
 import com.gallery.core.domain.usecase.RenameUserAlbumGroupUseCase
 import com.gallery.core.domain.usecase.SetAlbumGroupUseCase
+import com.gallery.core.domain.usecase.SetDefaultGridColumnsUseCase
 import com.gallery.core.domain.usecase.ToggleFavoriteUseCase
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -161,6 +162,7 @@ class GalleryViewModel @Inject constructor(
     private val deleteUserAlbumGroupUseCase: DeleteUserAlbumGroupUseCase,
     private val moveMediaToAlbumUseCase: MoveMediaToAlbumUseCase,
     getDefaultGridColumnsUseCase: GetDefaultGridColumnsUseCase,
+    private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase,
     private val appUpdateRepository: AppUpdateRepository
 ) : ViewModel() {
 
@@ -216,6 +218,12 @@ class GalleryViewModel @Inject constructor(
 
     val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 3)
+
+    fun setGridColumns(columns: Int) {
+        viewModelScope.launch {
+            setDefaultGridColumnsUseCase(columns.coerceIn(2, 5))
+        }
+    }
     val selectedTab = MutableStateFlow(GalleryTab.TIMELINE)
     val selectedAlbum = MutableStateFlow<Album?>(null)
     val isGroupedView = MutableStateFlow(true)

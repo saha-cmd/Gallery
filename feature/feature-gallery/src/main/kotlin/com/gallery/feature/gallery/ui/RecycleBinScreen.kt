@@ -43,7 +43,7 @@ import android.graphics.Bitmap
 import com.gallery.core.domain.model.RecycleBinItem
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.util.LoadedThumbnailRegistry
+import com.gallery.core.ui.components.pinchToZoomGrid
 import com.gallery.feature.gallery.viewmodel.RecycleBinViewModel
 import java.io.File
 
@@ -54,6 +54,7 @@ fun RecycleBinScreen(
     viewModel: RecycleBinViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val gridColumns by viewModel.gridColumns.collectAsStateWithLifecycle()
     var showEmptyBinDialog by remember { mutableStateOf(false) }
     var itemToDeletePermanently by remember { mutableStateOf<RecycleBinItem?>(null) }
     var itemForActionSheet by remember { mutableStateOf<RecycleBinItem?>(null) }
@@ -176,11 +177,17 @@ fun RecycleBinScreen(
                     Box(modifier = Modifier.fillMaxSize()) {
                         LazyVerticalGrid(
                             state = gridState,
-                            columns = GridCells.Fixed(3),
+                            columns = GridCells.Fixed(gridColumns),
                             contentPadding = PaddingValues(2.dp),
                             horizontalArrangement = Arrangement.spacedBy(2.dp),
                             verticalArrangement = Arrangement.spacedBy(2.dp),
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pinchToZoomGrid(
+                                    currentColumns = gridColumns,
+                                    gridState = gridState,
+                                    onColumnsChanged = viewModel::setGridColumns
+                                )
                         ) {
                             items(uiState.items, key = { it.id }) { item ->
                                 val isSelected = item.id in uiState.selectedItemIds
@@ -431,17 +438,16 @@ private fun RecycleBinThumbnailCard(
     val context = LocalContext.current
     val cacheKey = "recycle_${item.id}"
     val imageLoader = context.imageLoader
-    val isAlreadyLoaded = LoadedThumbnailRegistry.isLoaded(cacheKey) ||
-        imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
+    val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
     var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isAlreadyLoaded || !isScrolling)
+        mutableStateOf(isInMemoryCache || !isScrolling)
     }
-    if (isAlreadyLoaded && !shouldLoad) {
+    if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
         shouldLoad = true
     }
-    LaunchedEffect(isScrolling) {
-        if (!isScrolling) {
-            shouldLoad = true
+    DisposableEffect(cacheKey) {
+        onDispose {
+            shouldLoad = false
         }
     }
 
@@ -469,11 +475,6 @@ private fun RecycleBinThumbnailCard(
                     .crossfade(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .listener(
-                        onSuccess = { _, _ ->
-                            LoadedThumbnailRegistry.markLoaded(cacheKey)
-                        }
-                    )
                     .build()
             }
             AsyncImage(

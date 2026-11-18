@@ -20,7 +20,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,7 +29,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -43,7 +42,6 @@ import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Scale
 import com.gallery.core.domain.model.MediaItem
-import com.gallery.core.ui.util.LoadedThumbnailRegistry
 import java.io.File
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -75,10 +73,7 @@ fun MediaThumbnail(
             )
     } else {
         modifier
-            .padding(0.dp)
-            .clip(RectangleShape)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-            .border(0.dp, Color.Transparent, RectangleShape)
     }
 
     Box(
@@ -90,18 +85,16 @@ fun MediaThumbnail(
         val context = LocalContext.current
         val cacheKey = "thumb_${item.id}"
         val imageLoader = context.imageLoader
-        val isAlreadyLoaded = LoadedThumbnailRegistry.isLoaded(cacheKey) ||
-            imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
+        val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
         var shouldLoad by remember(cacheKey) {
-            mutableStateOf(isAlreadyLoaded || !isScrolling)
+            mutableStateOf(isInMemoryCache || !isScrolling)
         }
-        if (isAlreadyLoaded && !shouldLoad) {
+        if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
             shouldLoad = true
         }
-
-        LaunchedEffect(isScrolling) {
-            if (!isScrolling) {
-                shouldLoad = true
+        DisposableEffect(cacheKey) {
+            onDispose {
+                shouldLoad = false
             }
         }
 
@@ -119,11 +112,6 @@ fun MediaThumbnail(
                     .crossfade(false)
                     .memoryCachePolicy(CachePolicy.ENABLED)
                     .diskCachePolicy(CachePolicy.ENABLED)
-                    .listener(
-                        onSuccess = { _, _ ->
-                            LoadedThumbnailRegistry.markLoaded(cacheKey)
-                        }
-                    )
                     .build()
             }
 

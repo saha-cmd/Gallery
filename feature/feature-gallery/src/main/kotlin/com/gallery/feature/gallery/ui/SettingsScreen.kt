@@ -225,7 +225,7 @@ fun SettingsScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                imageVector = if (gridColumns == 3) Icons.Outlined.GridView else Icons.Outlined.GridOn,
+                                imageVector = if (gridColumns <= 3) Icons.Outlined.GridView else Icons.Outlined.GridOn,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(22.dp)
@@ -240,31 +240,52 @@ fun SettingsScreen(
                         }
 
                         Text(
-                            text = "Choose how photos and albums are organized by default across tabs.",
+                            text = "Choose how photos and videos are organized by default, or pinch in/out on any media grid (2–5 columns).",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
                         Spacer(Modifier.height(4.dp))
 
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            ThemeOptionButton(
-                                label = "3 Columns (Larger)",
-                                icon = Icons.Outlined.GridView,
-                                isSelected = gridColumns == 3,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setDefaultGridColumns(3) }
-                            )
-                            ThemeOptionButton(
-                                label = "4 Columns (Compact)",
-                                icon = Icons.Outlined.GridOn,
-                                isSelected = gridColumns == 4,
-                                modifier = Modifier.weight(1f),
-                                onClick = { viewModel.setDefaultGridColumns(4) }
-                            )
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ThemeOptionButton(
+                                    label = "2 Columns (XL)",
+                                    icon = Icons.Outlined.GridView,
+                                    isSelected = gridColumns == 2,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setDefaultGridColumns(2) }
+                                )
+                                ThemeOptionButton(
+                                    label = "3 Columns (Large)",
+                                    icon = Icons.Outlined.GridView,
+                                    isSelected = gridColumns == 3,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setDefaultGridColumns(3) }
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                ThemeOptionButton(
+                                    label = "4 Columns (Medium)",
+                                    icon = Icons.Outlined.GridOn,
+                                    isSelected = gridColumns == 4,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setDefaultGridColumns(4) }
+                                )
+                                ThemeOptionButton(
+                                    label = "5 Columns (Compact)",
+                                    icon = Icons.Outlined.GridOn,
+                                    isSelected = gridColumns == 5,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { viewModel.setDefaultGridColumns(5) }
+                                )
+                            }
                         }
                     }
                 }

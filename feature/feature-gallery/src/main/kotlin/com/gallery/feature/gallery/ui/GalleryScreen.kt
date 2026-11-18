@@ -71,7 +71,7 @@ import com.gallery.core.ui.components.MoveToGroupDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.RenameAlbumDialog
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.util.LoadedThumbnailRegistry
+import com.gallery.core.ui.components.pinchToZoomGrid
 import com.gallery.feature.gallery.viewmodel.AlbumGroupSection
 import com.gallery.feature.gallery.viewmodel.GalleryTab
 import com.gallery.feature.gallery.viewmodel.GalleryUiState
@@ -172,7 +172,8 @@ fun GalleryScreen(
             onRenameAlbum = { albumId, newName -> viewModel.renameCustomAlbum(albumId, newName) },
             onDeleteAlbum = { albumId -> viewModel.deleteCustomAlbum(albumId) },
             onAddItemsToAlbum = { albumId, items -> viewModel.addItemsToCustomAlbum(albumId, items) },
-            columnCount = gridColumns
+            columnCount = gridColumns,
+            onColumnCountChanged = viewModel::setGridColumns
         )
         return
     }
@@ -376,6 +377,7 @@ fun GalleryScreen(
                                 GalleryTab.TIMELINE -> TimelineGrid(
                                     mediaGroups = uiState.mediaGroups,
                                     columns = gridColumns,
+                                    onColumnsChanged = viewModel::setGridColumns,
                                     isSelectionMode = uiState.isSelectionMode,
                                     selectedIds = uiState.selectedItemIds,
                                     onItemClick = { item ->
@@ -424,6 +426,7 @@ fun GalleryScreen(
                                 GalleryTab.VIDEOS -> VideosGrid(
                                     videos = uiState.videos,
                                     columns = gridColumns,
+                                    onColumnsChanged = viewModel::setGridColumns,
                                     isSelectionMode = uiState.isSelectionMode,
                                     selectedIds = uiState.selectedItemIds,
                                     onVideoClick = { video ->
@@ -1191,6 +1194,7 @@ private fun FloatingNavItem(
 private fun TimelineGrid(
     mediaGroups: List<MediaGroup>,
     columns: Int,
+    onColumnsChanged: (Int) -> Unit,
     isSelectionMode: Boolean,
     selectedIds: Set<Long>,
     onItemClick: (MediaItem) -> Unit,
@@ -1227,7 +1231,13 @@ private fun TimelineGrid(
         LazyVerticalGrid(
             state = gridState,
             columns = GridCells.Fixed(columns),
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .pinchToZoomGrid(
+                    currentColumns = columns,
+                    gridState = gridState,
+                    onColumnsChanged = onColumnsChanged
+                ),
             contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 100.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1240,9 +1250,7 @@ private fun TimelineGrid(
                     DateGroupHeader(
                         label = group.dateLabel,
                         count = group.items.size,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .animateItem()
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
 
@@ -1257,7 +1265,7 @@ private fun TimelineGrid(
                         isSelectionMode = isSelectionMode,
                         isSelected = mediaItem.id in selectedIds,
                         isScrolling = isScrolling,
-                        targetSize = 160,
+                        targetSize = if (columns <= 2) 200 else 160,
                         modifier = Modifier.aspectRatio(1f)
                     )
                 }
@@ -1598,17 +1606,16 @@ private fun AlbumCard(
             val context = LocalContext.current
             val cacheKey = "album_cover_${album.id}_${album.coverUri}"
             val imageLoader = context.imageLoader
-            val isAlreadyLoaded = LoadedThumbnailRegistry.isLoaded(cacheKey) ||
-                imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
+            val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
             var shouldLoad by remember(cacheKey) {
-                mutableStateOf(isAlreadyLoaded || !isScrolling)
+                mutableStateOf(isInMemoryCache || !isScrolling)
             }
-            if (isAlreadyLoaded && !shouldLoad) {
+            if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
                 shouldLoad = true
             }
-            LaunchedEffect(isScrolling) {
-                if (!isScrolling) {
-                    shouldLoad = true
+            DisposableEffect(cacheKey) {
+                onDispose {
+                    shouldLoad = false
                 }
             }
 
@@ -1633,11 +1640,6 @@ private fun AlbumCard(
                                 .crossfade(false)
                                 .memoryCachePolicy(coil.request.CachePolicy.ENABLED)
                                 .diskCachePolicy(coil.request.CachePolicy.ENABLED)
-                                .listener(
-                                    onSuccess = { _, _ ->
-                                        LoadedThumbnailRegistry.markLoaded(cacheKey)
-                                    }
-                                )
                                 .build()
                         }
                         coil.compose.AsyncImage(
@@ -1763,6 +1765,7 @@ private fun VideosGrid(
     onVideoClick: (MediaItem.Video) -> Unit,
     onVideoLongClick: (MediaItem.Video) -> Unit,
     columns: Int = 3,
+    onColumnsChanged: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     if (videos.isEmpty()) {
@@ -1784,7 +1787,13 @@ private fun VideosGrid(
         LazyVerticalGrid(
             state = gridState,
             columns = GridCells.Fixed(columns),
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .pinchToZoomGrid(
+                    currentColumns = columns,
+                    gridState = gridState,
+                    onColumnsChanged = onColumnsChanged
+                ),
             contentPadding = PaddingValues(start = 2.dp, top = 2.dp, end = 2.dp, bottom = 100.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -1800,7 +1809,7 @@ private fun VideosGrid(
                     isSelectionMode = isSelectionMode,
                     isSelected = video.id in selectedIds,
                     isScrolling = isScrolling,
-                    targetSize = if (columns <= 2) 180 else 160,
+                    targetSize = if (columns <= 2) 200 else 160,
                     modifier = Modifier.aspectRatio(1f)
                 )
             }

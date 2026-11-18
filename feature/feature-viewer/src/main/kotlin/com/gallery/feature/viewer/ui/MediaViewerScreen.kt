@@ -6,21 +6,28 @@ import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.drawable.BitmapDrawable
 import android.os.Build
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -43,6 +50,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -50,8 +58,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
@@ -77,9 +87,12 @@ import com.gallery.core.ui.components.MoveToAlbumDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
 import com.gallery.core.ui.components.SleekVideoScrubber
 import com.gallery.core.ui.components.SwipeToDismissBox
+import com.gallery.feature.viewer.R
 import com.gallery.feature.viewer.viewmodel.ViewerViewModel
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.math.absoluteValue
 
@@ -102,7 +115,7 @@ fun MediaViewerScreen(
     var currentPhotoHasGainmap by remember { mutableStateOf(false) }
 
     val mediaList = uiState.mediaList
-    var isCurrentPhotoZoomed by remember { mutableStateOf(false) }
+    var isCurrentMediaZoomed by remember { mutableStateOf(false) }
 
     // Intercept Back button so back press directly closes the viewer
     BackHandler {
@@ -227,7 +240,7 @@ fun MediaViewerScreen(
 
     SwipeToDismissBox(
         onDismiss = onBack,
-        enabled = !isCurrentPhotoZoomed,
+        enabled = !isCurrentMediaZoomed,
         onSwipeUp = { showInfoSheet = true }
     ) {
         Box(
@@ -258,7 +271,7 @@ fun MediaViewerScreen(
 
                 // Reset zoom, XDR preview override, and more menu when navigating between pages or when item shifts
                 LaunchedEffect(currentItem?.id) {
-                    isCurrentPhotoZoomed = false
+                    isCurrentMediaZoomed = false
                     currentPhotoHasGainmap = false
                     isMoreMenuExpanded = false
                     viewModel.resetXdrPreview()
@@ -269,7 +282,7 @@ fun MediaViewerScreen(
                     modifier = Modifier.fillMaxSize(),
                     pageSpacing = 16.dp,
                     key = { mediaList.getOrNull(it)?.id ?: it },
-                    userScrollEnabled = !isCurrentPhotoZoomed,
+                    userScrollEnabled = !isCurrentMediaZoomed,
                     beyondViewportPageCount = 1
                 ) { page ->
                     val item = mediaList.getOrNull(page) ?: return@HorizontalPager
@@ -293,7 +306,7 @@ fun MediaViewerScreen(
                                 onTap = { areControlsVisible = !areControlsVisible },
                                 onZoomChanged = { zoomed ->
                                     if (page == pagerState.currentPage) {
-                                        isCurrentPhotoZoomed = zoomed
+                                        isCurrentMediaZoomed = zoomed
                                     }
                                 },
                                 onGainmapDetected = { hasGainmap ->
@@ -308,7 +321,12 @@ fun MediaViewerScreen(
                                 areControlsVisible = areControlsVisible,
                                 onTap = { areControlsVisible = !areControlsVisible },
                                 onScrubbingChanged = { isScrubbing = it },
-                                onVideoEnded = { areControlsVisible = true }
+                                onVideoEnded = { areControlsVisible = true },
+                                onZoomChanged = { zoomed ->
+                                    if (page == pagerState.currentPage) {
+                                        isCurrentMediaZoomed = zoomed
+                                    }
+                                }
                             )
                         }
                     }
@@ -461,42 +479,161 @@ fun ZoomablePhotoViewer(
 ) {
     var scale by remember(item.id) { mutableFloatStateOf(1f) }
     var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var containerSize by remember(item.id) { mutableStateOf(IntSize.Zero) }
+    val coroutineScope = rememberCoroutineScope()
+    var animationJob by remember(item.id) { mutableStateOf<Job?>(null) }
 
-    val transformableState = rememberTransformableState { zoomChange, panChange, _ ->
-        val newScale = (scale * zoomChange).coerceIn(1f, 5f)
-        scale = newScale
-        onZoomChanged(newScale > 1.05f)
-        val maxX = (scale - 1f) * 400f
-        val maxY = (scale - 1f) * 600f
-        offset = Offset(
-            x = (offset.x + panChange.x).coerceIn(-maxX, maxX),
-            y = (offset.y + panChange.y).coerceIn(-maxY, maxY)
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
+
+    fun clampOffset(target: Offset, targetScale: Float, size: IntSize): Offset {
+        if (targetScale <= 1f || size.width == 0 || size.height == 0) return Offset.Zero
+        val maxX = size.width * (targetScale - 1f) / 2f
+        val maxY = size.height * (targetScale - 1f) / 2f
+        return Offset(
+            x = target.x.coerceIn(-maxX, maxX),
+            y = target.y.coerceIn(-maxY, maxY)
         )
+    }
+
+    fun animateTransformTo(targetScale: Float, targetOffset: Offset, zoomed: Boolean) {
+        animationJob?.cancel()
+        currentOnZoomChanged(zoomed)
+        val startScale = scale
+        val startOffset = offset
+        animationJob = coroutineScope.launch {
+            val progress = Animatable(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            ) {
+                scale = lerp(startScale, targetScale, value)
+                offset = Offset(
+                    x = lerp(startOffset.x, targetOffset.x, value),
+                    y = lerp(startOffset.y, targetOffset.y, value)
+                )
+            }
+        }
     }
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = modifier
             .fillMaxSize()
-            .pointerInput(Unit) {
+            .onSizeChanged { newSize ->
+                containerSize = newSize
+                if (scale > 1f) {
+                    offset = clampOffset(offset, scale, newSize)
+                }
+            }
+            .pointerInput(item.id) {
                 detectTapGestures(
-                    onTap = { onTap() },
-                    onDoubleTap = {
-                        if (scale > 1f) {
-                            scale = 1f
-                            offset = Offset.Zero
-                            onZoomChanged(false)
+                    onTap = { currentOnTap() },
+                    onDoubleTap = { tapOffset ->
+                        if (scale > 1.02f) {
+                            animateTransformTo(
+                                targetScale = 1f,
+                                targetOffset = Offset.Zero,
+                                zoomed = false
+                            )
                         } else {
-                            scale = 2.5f
-                            onZoomChanged(true)
+                            val targetScale = 2.5f
+                            val containerCenter = Offset(
+                                containerSize.width / 2f,
+                                containerSize.height / 2f
+                            )
+                            val rawTargetOffset = (containerCenter - tapOffset) * (targetScale - 1f)
+                            val clampedTargetOffset = clampOffset(
+                                target = rawTargetOffset,
+                                targetScale = targetScale,
+                                size = containerSize
+                            )
+                            animateTransformTo(
+                                targetScale = targetScale,
+                                targetOffset = clampedTargetOffset,
+                                zoomed = true
+                            )
                         }
                     }
                 )
             }
-            .transformable(
-                state = transformableState,
-                enabled = scale > 1.05f
-            )
+            .pointerInput(item.id) {
+                val touchSlop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var wasMultiTouch = false
+                    var pastPanSlop = false
+                    var panAccumulated = Offset.Zero
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressedCount = event.changes.count { it.pressed }
+
+                        if (pressedCount >= 2) {
+                            wasMultiTouch = true
+                            animationJob?.cancel()
+
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val centroid = event.calculateCentroid(useCurrent = false)
+
+                            val oldScale = scale
+                            val newScale = (oldScale * zoomChange).coerceIn(0.85f, 5f)
+                            val scaleRatio = if (oldScale > 0f) newScale / oldScale else 1f
+
+                            val newRawOffset = if (centroid != Offset.Unspecified) {
+                                val containerCenter = Offset(
+                                    containerSize.width / 2f,
+                                    containerSize.height / 2f
+                                )
+                                val focalOffset = centroid - containerCenter
+                                offset + panChange + (offset - focalOffset) * (scaleRatio - 1f)
+                            } else {
+                                offset + panChange
+                            }
+
+                            scale = newScale
+                            offset = clampOffset(newRawOffset, newScale, containerSize)
+                            currentOnZoomChanged(newScale > 1.02f)
+
+                            event.changes.forEach { it.consume() }
+                        } else if (pressedCount == 1) {
+                            if (scale > 1.02f) {
+                                val panChange = event.calculatePan()
+                                if (!pastPanSlop && !wasMultiTouch) {
+                                    panAccumulated += panChange
+                                    if (panAccumulated.getDistance() > touchSlop) {
+                                        pastPanSlop = true
+                                        animationJob?.cancel()
+                                        offset = clampOffset(offset + panChange, scale, containerSize)
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                } else {
+                                    animationJob?.cancel()
+                                    offset = clampOffset(offset + panChange, scale, containerSize)
+                                    event.changes.forEach { it.consume() }
+                                }
+                            } else if (wasMultiTouch) {
+                                // Keep consuming trailing 1-finger movement after pinch-out so pager/dismiss don't trigger
+                                event.changes.forEach { it.consume() }
+                            }
+                        } else if (wasMultiTouch || pastPanSlop) {
+                            event.changes.forEach { it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+
+                    if (wasMultiTouch && scale <= 1.03f) {
+                        animateTransformTo(
+                            targetScale = 1f,
+                            targetOffset = Offset.Zero,
+                            zoomed = false
+                        )
+                    }
+                }
+            }
     ) {
         val context = LocalContext.current
         val fullResRequest = remember(item.id, item.uri, item.filePath) {
@@ -559,10 +696,60 @@ fun VideoPlayer(
     onTap: () -> Unit = {},
     onScrubbingChanged: (Boolean) -> Unit = {},
     onVideoEnded: () -> Unit = {},
+    onZoomChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var isMuted by remember(item.id) { mutableStateOf(false) }
+
+    var scale by remember(item.id) { mutableFloatStateOf(1f) }
+    var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var containerSize by remember(item.id) { mutableStateOf(IntSize.Zero) }
+    val coroutineScope = rememberCoroutineScope()
+    var animationJob by remember(item.id) { mutableStateOf<Job?>(null) }
+
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
+
+    fun clampOffset(target: Offset, targetScale: Float, size: IntSize): Offset {
+        if (targetScale <= 1f || size.width == 0 || size.height == 0) return Offset.Zero
+        val maxX = size.width * (targetScale - 1f) / 2f
+        val maxY = size.height * (targetScale - 1f) / 2f
+        return Offset(
+            x = target.x.coerceIn(-maxX, maxX),
+            y = target.y.coerceIn(-maxY, maxY)
+        )
+    }
+
+    fun animateTransformTo(targetScale: Float, targetOffset: Offset, zoomed: Boolean) {
+        animationJob?.cancel()
+        currentOnZoomChanged(zoomed)
+        val startScale = scale
+        val startOffset = offset
+        animationJob = coroutineScope.launch {
+            val progress = Animatable(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            ) {
+                scale = lerp(startScale, targetScale, value)
+                offset = Offset(
+                    x = lerp(startOffset.x, targetOffset.x, value),
+                    y = lerp(startOffset.y, targetOffset.y, value)
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(item.id) {
+        animationJob?.cancel()
+        scale = 1f
+        offset = Offset.Zero
+        currentOnZoomChanged(false)
+    }
 
     val exoPlayer = remember(item.uri, item.filePath) {
         val mediaUri = item.filePath?.let { path ->
@@ -657,12 +844,16 @@ fun VideoPlayer(
         }
     }
 
-    // Sync player play/pause state when page is swiped into or out of focus
+    // Sync player play/pause state and reset zoom when page is swiped into or out of focus
     LaunchedEffect(isActivePage) {
         if (isActivePage) {
             exoPlayer.play()
         } else {
             exoPlayer.pause()
+            animationJob?.cancel()
+            scale = 1f
+            offset = Offset.Zero
+            currentOnZoomChanged(false)
         }
     }
 
@@ -690,11 +881,13 @@ fun VideoPlayer(
     val sliderValue = displayPos.coerceIn(0f, totalDuration)
 
     Box(
-        modifier = modifier.fillMaxSize()
+        modifier = modifier
+            .fillMaxSize()
+            .clipToBounds()
     ) {
         AndroidView(
-            factory = {
-                PlayerView(it).apply {
+            factory = { ctx ->
+                (LayoutInflater.from(ctx).inflate(R.layout.viewer_texture_player_view, null) as PlayerView).apply {
                     player = exoPlayer
                     useController = false
                     layoutParams = ViewGroup.LayoutParams(
@@ -704,25 +897,135 @@ fun VideoPlayer(
                     setOnTouchListener { _, _ -> false }
                 }
             },
-            modifier = Modifier.fillMaxSize()
+            update = { playerView ->
+                if (playerView.player != exoPlayer) {
+                    playerView.player = exoPlayer
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                }
         )
 
-        // Overlay transparent Box to capture single-tap (toggle controls) and double-tap (±10s skip)
+        // Overlay transparent Box to capture pinch-to-zoom, pan, single-tap (toggle controls), and double-tap (1x/2.5x zoom)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
+                .onSizeChanged { newSize ->
+                    containerSize = newSize
+                    if (scale > 1f) {
+                        offset = clampOffset(offset, scale, newSize)
+                    }
+                }
+                .pointerInput(item.id) {
                     detectTapGestures(
-                        onTap = { onTap() },
-                        onDoubleTap = { offset ->
-                            val isRightSide = offset.x > (size.width / 2)
-                            if (isRightSide) {
-                                performSeek((currentPositionMs + 10_000f).toLong())
+                        onTap = { currentOnTap() },
+                        onDoubleTap = { tapOffset ->
+                            if (scale > 1.02f) {
+                                animateTransformTo(
+                                    targetScale = 1f,
+                                    targetOffset = Offset.Zero,
+                                    zoomed = false
+                                )
                             } else {
-                                performSeek((currentPositionMs - 10_000f).toLong())
+                                val targetScale = 2.5f
+                                val containerCenter = Offset(
+                                    containerSize.width / 2f,
+                                    containerSize.height / 2f
+                                )
+                                val rawTargetOffset = (containerCenter - tapOffset) * (targetScale - 1f)
+                                val clampedTargetOffset = clampOffset(
+                                    target = rawTargetOffset,
+                                    targetScale = targetScale,
+                                    size = containerSize
+                                )
+                                animateTransformTo(
+                                    targetScale = targetScale,
+                                    targetOffset = clampedTargetOffset,
+                                    zoomed = true
+                                )
                             }
                         }
                     )
+                }
+                .pointerInput(item.id) {
+                    val touchSlop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var wasMultiTouch = false
+                        var pastPanSlop = false
+                        var panAccumulated = Offset.Zero
+
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressedCount = event.changes.count { it.pressed }
+
+                            if (pressedCount >= 2) {
+                                wasMultiTouch = true
+                                animationJob?.cancel()
+
+                                val zoomChange = event.calculateZoom()
+                                val panChange = event.calculatePan()
+                                val centroid = event.calculateCentroid(useCurrent = false)
+
+                                val oldScale = scale
+                                val newScale = (oldScale * zoomChange).coerceIn(0.85f, 5f)
+                                val scaleRatio = if (oldScale > 0f) newScale / oldScale else 1f
+
+                                val newRawOffset = if (centroid != Offset.Unspecified) {
+                                    val containerCenter = Offset(
+                                        containerSize.width / 2f,
+                                        containerSize.height / 2f
+                                    )
+                                    val focalOffset = centroid - containerCenter
+                                    offset + panChange + (offset - focalOffset) * (scaleRatio - 1f)
+                                } else {
+                                    offset + panChange
+                                }
+
+                                scale = newScale
+                                offset = clampOffset(newRawOffset, newScale, containerSize)
+                                currentOnZoomChanged(newScale > 1.02f)
+
+                                event.changes.forEach { it.consume() }
+                            } else if (pressedCount == 1) {
+                                if (scale > 1.02f) {
+                                    val panChange = event.calculatePan()
+                                    if (!pastPanSlop && !wasMultiTouch) {
+                                        panAccumulated += panChange
+                                        if (panAccumulated.getDistance() > touchSlop) {
+                                            pastPanSlop = true
+                                            animationJob?.cancel()
+                                            offset = clampOffset(offset + panChange, scale, containerSize)
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                    } else {
+                                        animationJob?.cancel()
+                                        offset = clampOffset(offset + panChange, scale, containerSize)
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                } else if (wasMultiTouch) {
+                                    // Keep consuming trailing 1-finger movement after pinch-out so pager/dismiss don't trigger
+                                    event.changes.forEach { it.consume() }
+                                }
+                            } else if (wasMultiTouch || pastPanSlop) {
+                                event.changes.forEach { it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+
+                        if (wasMultiTouch && scale <= 1.03f) {
+                            animateTransformTo(
+                                targetScale = 1f,
+                                targetOffset = Offset.Zero,
+                                zoomed = false
+                            )
+                        }
+                    }
                 }
         )
 

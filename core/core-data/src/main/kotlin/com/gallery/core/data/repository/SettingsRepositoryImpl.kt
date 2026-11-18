@@ -98,7 +98,7 @@ class SettingsRepositoryImpl @Inject constructor(
         }
         .map { preferences ->
             val cols = preferences[PreferencesKeys.GRID_COLUMNS] ?: 3
-            if (cols in 3..4) cols else 3
+            if (cols in 2..5) cols else 3
         }
 
     override val themeMode: Flow<ThemeMode> = context.dataStore.data
@@ -132,7 +132,7 @@ class SettingsRepositoryImpl @Inject constructor(
 
     override suspend fun setDefaultGridColumns(columns: Int) {
         context.dataStore.edit { preferences ->
-            preferences[PreferencesKeys.GRID_COLUMNS] = columns.coerceIn(3, 4)
+            preferences[PreferencesKeys.GRID_COLUMNS] = columns.coerceIn(2, 5)
         }
     }
 

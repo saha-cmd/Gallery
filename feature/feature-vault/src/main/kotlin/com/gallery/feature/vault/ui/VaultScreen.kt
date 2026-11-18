@@ -2,19 +2,25 @@ package com.gallery.feature.vault.ui
 
 import android.graphics.Bitmap
 import android.net.Uri
+import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.rememberTransformableState
-import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
 import androidx.compose.foundation.pager.HorizontalPager
@@ -36,15 +42,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
@@ -73,10 +81,13 @@ import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.SwipeToDismissBox
 import com.gallery.core.ui.components.VaultInfoBottomSheet
 import com.gallery.core.ui.components.VerticalFastScrollbar
-import com.gallery.core.ui.util.LoadedThumbnailRegistry
+import com.gallery.core.ui.components.pinchToZoomGrid
+import com.gallery.feature.vault.R
 import com.gallery.feature.vault.viewmodel.VaultAlbum
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import com.gallery.feature.vault.viewmodel.VaultTab
 import com.gallery.feature.vault.viewmodel.VaultViewModel
 import java.io.File
@@ -90,6 +101,7 @@ fun VaultScreen(
     viewModel: VaultViewModel = hiltViewModel()
 ) {
     val vaultState by viewModel.vaultState.collectAsStateWithLifecycle()
+    val gridColumns by viewModel.gridColumns.collectAsStateWithLifecycle()
     val view = LocalView.current
     var itemToDelete by remember { mutableStateOf<VaultItem?>(null) }
     var showVaultMenu by remember { mutableStateOf(false) }
@@ -226,16 +238,21 @@ fun VaultScreen(
                         Box(modifier = Modifier.fillMaxSize()) {
                             LazyVerticalGrid(
                                 state = inAlbumGridState,
-                                columns = GridCells.Fixed(3),
+                                columns = GridCells.Fixed(gridColumns),
                                 contentPadding = PaddingValues(2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(2.dp),
                                 verticalArrangement = Arrangement.spacedBy(2.dp),
-                                modifier = Modifier.fillMaxSize()
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .pinchToZoomGrid(
+                                        currentColumns = gridColumns,
+                                        gridState = inAlbumGridState,
+                                        onColumnsChanged = viewModel::setGridColumns
+                                    )
                             ) {
                                 items(displayedItems, key = { it.id }) { vaultItem ->
                                     VaultThumbnailCard(
                                         item = vaultItem,
-                                        previewBitmap = vaultState.previewBitmaps[vaultItem.id],
                                         previewFile = vaultState.previewFiles[vaultItem.id],
                                         isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
                                         isScrolling = isInAlbumScrolling,
@@ -282,16 +299,21 @@ fun VaultScreen(
                                 Box(modifier = Modifier.fillMaxSize()) {
                                     LazyVerticalGrid(
                                         state = allMediaGridState,
-                                        columns = GridCells.Fixed(3),
+                                        columns = GridCells.Fixed(gridColumns),
                                         contentPadding = PaddingValues(2.dp),
                                         horizontalArrangement = Arrangement.spacedBy(2.dp),
                                         verticalArrangement = Arrangement.spacedBy(2.dp),
-                                        modifier = Modifier.fillMaxSize()
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .pinchToZoomGrid(
+                                                currentColumns = gridColumns,
+                                                gridState = allMediaGridState,
+                                                onColumnsChanged = viewModel::setGridColumns
+                                            )
                                     ) {
                                         items(vaultState.items, key = { it.id }) { vaultItem ->
                                             VaultThumbnailCard(
                                                 item = vaultItem,
-                                                previewBitmap = vaultState.previewBitmaps[vaultItem.id],
                                                 previewFile = vaultState.previewFiles[vaultItem.id],
                                                 isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
                                                 isScrolling = isAllMediaScrolling,
@@ -332,7 +354,6 @@ fun VaultScreen(
                                             items(vaultState.albums, key = { it.name }) { album ->
                                                 VaultAlbumCard(
                                                     album = album,
-                                                    coverBitmap = album.coverItem?.let { vaultState.previewBitmaps[it.id] },
                                                     coverFile = album.coverItem?.let { vaultState.previewFiles[it.id] },
                                                     isScrolling = isAlbumsScrolling,
                                                     onRequestPreview = { viewModel.requestPreview(it) },
@@ -508,7 +529,6 @@ fun VaultScreen(
 @Composable
 private fun VaultAlbumCard(
     album: VaultAlbum,
-    coverBitmap: Bitmap?,
     coverFile: File?,
     onClick: () -> Unit,
     isScrolling: Boolean = false,
@@ -519,22 +539,20 @@ private fun VaultAlbumCard(
     val coverItem = album.coverItem
     val cacheKey = "vault_thumb_${coverItem?.id ?: album.name}"
     val imageLoader = context.imageLoader
-    val isAlreadyLoaded = coverBitmap != null ||
-        LoadedThumbnailRegistry.isLoaded(cacheKey) ||
-        imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
+    val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
     var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isAlreadyLoaded || !isScrolling)
+        mutableStateOf(isInMemoryCache || !isScrolling)
     }
-    if (isAlreadyLoaded && !shouldLoad) {
+    if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
         shouldLoad = true
     }
-    LaunchedEffect(isScrolling) {
-        if (!isScrolling) {
-            shouldLoad = true
+    DisposableEffect(cacheKey) {
+        onDispose {
+            shouldLoad = false
         }
     }
     LaunchedEffect(coverItem?.id, shouldLoad) {
-        if (shouldLoad && coverItem != null && coverBitmap == null) {
+        if (shouldLoad && coverItem != null && coverFile == null) {
             onRequestPreview(coverItem)
         }
     }
@@ -555,49 +573,28 @@ private fun VaultAlbumCard(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                if (coverBitmap != null) {
-                    Image(
-                        bitmap = coverBitmap.asImageBitmap(),
+                if (shouldLoad && coverFile != null && coverFile.exists()) {
+                    val thumbRequest = remember(coverFile.absolutePath, cacheKey) {
+                        ImageRequest.Builder(context)
+                            .data(coverFile)
+                            .size(180, 180)
+                            .precision(Precision.INEXACT)
+                            .scale(Scale.FILL)
+                            .bitmapConfig(Bitmap.Config.RGB_565)
+                            .allowHardware(true)
+                            .memoryCacheKey(cacheKey)
+                            .diskCacheKey(cacheKey)
+                            .crossfade(false)
+                            .memoryCachePolicy(CachePolicy.ENABLED)
+                            .diskCachePolicy(CachePolicy.ENABLED)
+                            .build()
+                    }
+                    AsyncImage(
+                        model = thumbRequest,
                         contentDescription = album.name,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize()
                     )
-                } else if (shouldLoad) {
-                    if (coverFile != null && coverFile.exists()) {
-                        val thumbRequest = remember(coverFile.absolutePath) {
-                            ImageRequest.Builder(context)
-                                .data(coverFile)
-                                .size(180, 180)
-                                .precision(Precision.INEXACT)
-                                .scale(Scale.FILL)
-                                .bitmapConfig(Bitmap.Config.RGB_565)
-                                .allowHardware(true)
-                                .memoryCacheKey(cacheKey)
-                                .diskCacheKey(cacheKey)
-                                .crossfade(false)
-                                .memoryCachePolicy(CachePolicy.ENABLED)
-                                .diskCachePolicy(CachePolicy.ENABLED)
-                                .listener(
-                                    onSuccess = { _, _ ->
-                                        LoadedThumbnailRegistry.markLoaded(cacheKey)
-                                    }
-                                )
-                                .build()
-                        }
-                        AsyncImage(
-                            model = thumbRequest,
-                            contentDescription = album.name,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier.fillMaxSize()
-                        )
-                    } else {
-                        Icon(
-                            imageVector = Icons.Outlined.FolderSpecial,
-                            contentDescription = null,
-                            modifier = Modifier.size(48.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
                 } else {
                     Icon(
                         imageVector = Icons.Outlined.FolderSpecial,
@@ -627,7 +624,6 @@ private fun VaultAlbumCard(
 @Composable
 private fun VaultThumbnailCard(
     item: VaultItem,
-    previewBitmap: Bitmap?,
     previewFile: File?,
     isCorrupted: Boolean,
     onClick: () -> Unit,
@@ -642,22 +638,20 @@ private fun VaultThumbnailCard(
     val context = LocalContext.current
     val cacheKey = "vault_thumb_${item.id}"
     val imageLoader = context.imageLoader
-    val isAlreadyLoaded = previewBitmap != null ||
-        LoadedThumbnailRegistry.isLoaded(cacheKey) ||
-        imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
+    val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
     var shouldLoad by remember(cacheKey) {
-        mutableStateOf(isAlreadyLoaded || !isScrolling)
+        mutableStateOf(isInMemoryCache || !isScrolling)
     }
-    if (isAlreadyLoaded && !shouldLoad) {
+    if (!shouldLoad && (isInMemoryCache || !isScrolling)) {
         shouldLoad = true
     }
-    LaunchedEffect(isScrolling) {
-        if (!isScrolling) {
-            shouldLoad = true
+    DisposableEffect(cacheKey) {
+        onDispose {
+            shouldLoad = false
         }
     }
     LaunchedEffect(item.id, shouldLoad) {
-        if (shouldLoad && previewBitmap == null) {
+        if (shouldLoad && previewFile == null) {
             onRequestPreview()
         }
     }
@@ -668,14 +662,7 @@ private fun VaultThumbnailCard(
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .clickable(onClick = onClick)
     ) {
-        if (previewBitmap != null) {
-            Image(
-                bitmap = previewBitmap.asImageBitmap(),
-                contentDescription = item.originalName,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else if (shouldLoad) {
+        if (shouldLoad) {
             if (previewFile != null && previewFile.exists()) {
                 val thumbRequest = remember(previewFile.absolutePath, item.id) {
                     ImageRequest.Builder(context)
@@ -690,11 +677,6 @@ private fun VaultThumbnailCard(
                         .crossfade(false)
                         .memoryCachePolicy(CachePolicy.ENABLED)
                         .diskCachePolicy(CachePolicy.ENABLED)
-                        .listener(
-                            onSuccess = { _, _ ->
-                                LoadedThumbnailRegistry.markLoaded(cacheKey)
-                            }
-                        )
                         .build()
                 }
                 AsyncImage(
@@ -831,7 +813,7 @@ private fun VaultMediaViewer(
         items.indexOfFirst { it.id == initialItem.id }.coerceAtLeast(0)
     }
     val pagerState = rememberPagerState(initialPage = initialIndex) { items.size }
-    var isCurrentPhotoZoomed by remember { mutableStateOf(false) }
+    var isCurrentMediaZoomed by remember { mutableStateOf(false) }
     var areControlsVisible by remember { mutableStateOf(true) }
     var isScrubbing by remember { mutableStateOf(false) }
     var showInfoSheet by remember { mutableStateOf(false) }
@@ -862,7 +844,7 @@ private fun VaultMediaViewer(
 
     // Reset zoom and notify page change when current item changes
     LaunchedEffect(currentItem.id) {
-        isCurrentPhotoZoomed = false
+        isCurrentMediaZoomed = false
         val targetIndex = items.indexOfFirst { it.id == currentItem.id }.coerceAtLeast(0)
         onPageChanged(targetIndex)
     }
@@ -876,7 +858,7 @@ private fun VaultMediaViewer(
 
     SwipeToDismissBox(
         onDismiss = onClose,
-        enabled = !isCurrentPhotoZoomed,
+        enabled = !isCurrentMediaZoomed,
         onSwipeUp = { showInfoSheet = true }
     ) {
         Box(
@@ -889,7 +871,7 @@ private fun VaultMediaViewer(
                 modifier = Modifier.fillMaxSize(),
                 pageSpacing = 16.dp,
                 key = { items.getOrNull(it)?.id ?: it },
-                userScrollEnabled = !isCurrentPhotoZoomed,
+                userScrollEnabled = !isCurrentMediaZoomed,
                 beyondViewportPageCount = 1
             ) { page ->
                 val item = items.getOrNull(page) ?: return@HorizontalPager
@@ -915,16 +897,21 @@ private fun VaultMediaViewer(
                                 areControlsVisible = areControlsVisible,
                                 onTap = { areControlsVisible = !areControlsVisible },
                                 onScrubbingChanged = { isScrubbing = it },
-                                onVideoEnded = { areControlsVisible = true }
+                                onVideoEnded = { areControlsVisible = true },
+                                onZoomChanged = { zoomed ->
+                                    if (page == pagerState.currentPage) {
+                                        isCurrentMediaZoomed = zoomed
+                                    }
+                                }
                             )
                         } else {
                             VaultZoomablePhoto(
                                 file = pageFile,
                                 item = item,
                                 onTap = { areControlsVisible = !areControlsVisible },
-                                onZoomChanged = {
+                                onZoomChanged = { zoomed ->
                                     if (page == pagerState.currentPage) {
-                                        isCurrentPhotoZoomed = it
+                                        isCurrentMediaZoomed = zoomed
                                     }
                                 }
                             )
@@ -1062,42 +1049,161 @@ private fun VaultZoomablePhoto(
 ) {
     var scale by remember(item.id) { mutableFloatStateOf(1f) }
     var offset by remember(item.id) { mutableStateOf(Offset.Zero) }
+    var containerSize by remember(item.id) { mutableStateOf(IntSize.Zero) }
+    val coroutineScope = rememberCoroutineScope()
+    var animationJob by remember(item.id) { mutableStateOf<Job?>(null) }
 
-    val transformableState = rememberTransformableState { zoomChange, panChange, _ ->
-        val newScale = (scale * zoomChange).coerceIn(1f, 5f)
-        scale = newScale
-        onZoomChanged(newScale > 1.05f)
-        val maxX = (scale - 1f) * 400f
-        val maxY = (scale - 1f) * 600f
-        offset = Offset(
-            x = (offset.x + panChange.x).coerceIn(-maxX, maxX),
-            y = (offset.y + panChange.y).coerceIn(-maxY, maxY)
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
+
+    fun clampOffset(target: Offset, targetScale: Float, size: IntSize): Offset {
+        if (targetScale <= 1f || size.width == 0 || size.height == 0) return Offset.Zero
+        val maxX = size.width * (targetScale - 1f) / 2f
+        val maxY = size.height * (targetScale - 1f) / 2f
+        return Offset(
+            x = target.x.coerceIn(-maxX, maxX),
+            y = target.y.coerceIn(-maxY, maxY)
         )
+    }
+
+    fun animateTransformTo(targetScale: Float, targetOffset: Offset, zoomed: Boolean) {
+        animationJob?.cancel()
+        currentOnZoomChanged(zoomed)
+        val startScale = scale
+        val startOffset = offset
+        animationJob = coroutineScope.launch {
+            val progress = Animatable(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            ) {
+                scale = lerp(startScale, targetScale, value)
+                offset = Offset(
+                    x = lerp(startOffset.x, targetOffset.x, value),
+                    y = lerp(startOffset.y, targetOffset.y, value)
+                )
+            }
+        }
     }
 
     Box(
         contentAlignment = Alignment.Center,
         modifier = Modifier
             .fillMaxSize()
-            .pointerInput(Unit) {
+            .onSizeChanged { newSize ->
+                containerSize = newSize
+                if (scale > 1f) {
+                    offset = clampOffset(offset, scale, newSize)
+                }
+            }
+            .pointerInput(item.id) {
                 detectTapGestures(
-                    onTap = { onTap() },
-                    onDoubleTap = {
-                        if (scale > 1f) {
-                            scale = 1f
-                            offset = Offset.Zero
-                            onZoomChanged(false)
+                    onTap = { currentOnTap() },
+                    onDoubleTap = { tapOffset ->
+                        if (scale > 1.02f) {
+                            animateTransformTo(
+                                targetScale = 1f,
+                                targetOffset = Offset.Zero,
+                                zoomed = false
+                            )
                         } else {
-                            scale = 2.5f
-                            onZoomChanged(true)
+                            val targetScale = 2.5f
+                            val containerCenter = Offset(
+                                containerSize.width / 2f,
+                                containerSize.height / 2f
+                            )
+                            val rawTargetOffset = (containerCenter - tapOffset) * (targetScale - 1f)
+                            val clampedTargetOffset = clampOffset(
+                                target = rawTargetOffset,
+                                targetScale = targetScale,
+                                size = containerSize
+                            )
+                            animateTransformTo(
+                                targetScale = targetScale,
+                                targetOffset = clampedTargetOffset,
+                                zoomed = true
+                            )
                         }
                     }
                 )
             }
-            .transformable(
-                state = transformableState,
-                enabled = scale > 1.05f
-            )
+            .pointerInput(item.id) {
+                val touchSlop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    var wasMultiTouch = false
+                    var pastPanSlop = false
+                    var panAccumulated = Offset.Zero
+
+                    do {
+                        val event = awaitPointerEvent()
+                        val pressedCount = event.changes.count { it.pressed }
+
+                        if (pressedCount >= 2) {
+                            wasMultiTouch = true
+                            animationJob?.cancel()
+
+                            val zoomChange = event.calculateZoom()
+                            val panChange = event.calculatePan()
+                            val centroid = event.calculateCentroid(useCurrent = false)
+
+                            val oldScale = scale
+                            val newScale = (oldScale * zoomChange).coerceIn(0.85f, 5f)
+                            val scaleRatio = if (oldScale > 0f) newScale / oldScale else 1f
+
+                            val newRawOffset = if (centroid != Offset.Unspecified) {
+                                val containerCenter = Offset(
+                                    containerSize.width / 2f,
+                                    containerSize.height / 2f
+                                )
+                                val focalOffset = centroid - containerCenter
+                                offset + panChange + (offset - focalOffset) * (scaleRatio - 1f)
+                            } else {
+                                offset + panChange
+                            }
+
+                            scale = newScale
+                            offset = clampOffset(newRawOffset, newScale, containerSize)
+                            currentOnZoomChanged(newScale > 1.02f)
+
+                            event.changes.forEach { it.consume() }
+                        } else if (pressedCount == 1) {
+                            if (scale > 1.02f) {
+                                val panChange = event.calculatePan()
+                                if (!pastPanSlop && !wasMultiTouch) {
+                                    panAccumulated += panChange
+                                    if (panAccumulated.getDistance() > touchSlop) {
+                                        pastPanSlop = true
+                                        animationJob?.cancel()
+                                        offset = clampOffset(offset + panChange, scale, containerSize)
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                } else {
+                                    animationJob?.cancel()
+                                    offset = clampOffset(offset + panChange, scale, containerSize)
+                                    event.changes.forEach { it.consume() }
+                                }
+                            } else if (wasMultiTouch) {
+                                // Keep consuming trailing 1-finger movement after pinch-out so pager/dismiss don't trigger
+                                event.changes.forEach { it.consume() }
+                            }
+                        } else if (wasMultiTouch || pastPanSlop) {
+                            event.changes.forEach { it.consume() }
+                        }
+                    } while (event.changes.any { it.pressed })
+
+                    if (wasMultiTouch && scale <= 1.03f) {
+                        animateTransformTo(
+                            targetScale = 1f,
+                            targetOffset = Offset.Zero,
+                            zoomed = false
+                        )
+                    }
+                }
+            }
     ) {
         val context = LocalContext.current
         val fullResRequest = remember(file.absolutePath, item.id) {
@@ -1151,10 +1257,60 @@ private fun VaultVideoPlayer(
     areControlsVisible: Boolean = true,
     onTap: () -> Unit = {},
     onScrubbingChanged: (Boolean) -> Unit = {},
-    onVideoEnded: () -> Unit = {}
+    onVideoEnded: () -> Unit = {},
+    onZoomChanged: (Boolean) -> Unit = {}
 ) {
     val context = LocalContext.current
     var isMuted by remember(file.absolutePath) { mutableStateOf(false) }
+
+    var scale by remember(file.absolutePath) { mutableFloatStateOf(1f) }
+    var offset by remember(file.absolutePath) { mutableStateOf(Offset.Zero) }
+    var containerSize by remember(file.absolutePath) { mutableStateOf(IntSize.Zero) }
+    val coroutineScope = rememberCoroutineScope()
+    var animationJob by remember(file.absolutePath) { mutableStateOf<Job?>(null) }
+
+    val currentOnTap by rememberUpdatedState(onTap)
+    val currentOnZoomChanged by rememberUpdatedState(onZoomChanged)
+
+    fun clampOffset(target: Offset, targetScale: Float, size: IntSize): Offset {
+        if (targetScale <= 1f || size.width == 0 || size.height == 0) return Offset.Zero
+        val maxX = size.width * (targetScale - 1f) / 2f
+        val maxY = size.height * (targetScale - 1f) / 2f
+        return Offset(
+            x = target.x.coerceIn(-maxX, maxX),
+            y = target.y.coerceIn(-maxY, maxY)
+        )
+    }
+
+    fun animateTransformTo(targetScale: Float, targetOffset: Offset, zoomed: Boolean) {
+        animationJob?.cancel()
+        currentOnZoomChanged(zoomed)
+        val startScale = scale
+        val startOffset = offset
+        animationJob = coroutineScope.launch {
+            val progress = Animatable(0f)
+            progress.animateTo(
+                targetValue = 1f,
+                animationSpec = spring(
+                    dampingRatio = Spring.DampingRatioNoBouncy,
+                    stiffness = Spring.StiffnessMedium
+                )
+            ) {
+                scale = lerp(startScale, targetScale, value)
+                offset = Offset(
+                    x = lerp(startOffset.x, targetOffset.x, value),
+                    y = lerp(startOffset.y, targetOffset.y, value)
+                )
+            }
+        }
+    }
+
+    LaunchedEffect(file.absolutePath) {
+        animationJob?.cancel()
+        scale = 1f
+        offset = Offset.Zero
+        currentOnZoomChanged(false)
+    }
 
     val exoPlayer = remember(file.absolutePath) {
         val extractorsFactory = DefaultExtractorsFactory().apply {
@@ -1256,12 +1412,16 @@ private fun VaultVideoPlayer(
         }
     }
 
-    // Sync player play/pause state when page is swiped into or out of focus
+    // Sync player play/pause state and reset zoom when page is swiped into or out of focus
     LaunchedEffect(isActivePage) {
         if (isActivePage) {
             exoPlayer.play()
         } else {
             exoPlayer.pause()
+            animationJob?.cancel()
+            scale = 1f
+            offset = Offset.Zero
+            currentOnZoomChanged(false)
         }
     }
 
@@ -1289,11 +1449,13 @@ private fun VaultVideoPlayer(
     val sliderValue = displayPos.coerceIn(0f, totalDuration)
 
     Box(
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier
+            .fillMaxSize()
+            .clipToBounds()
     ) {
         AndroidView(
-            factory = {
-                PlayerView(it).apply {
+            factory = { ctx ->
+                (LayoutInflater.from(ctx).inflate(R.layout.vault_texture_player_view, null) as PlayerView).apply {
                     player = exoPlayer
                     useController = false
                     layoutParams = ViewGroup.LayoutParams(
@@ -1303,25 +1465,135 @@ private fun VaultVideoPlayer(
                     setOnTouchListener { _, _ -> false }
                 }
             },
-            modifier = Modifier.fillMaxSize()
+            update = { playerView ->
+                if (playerView.player != exoPlayer) {
+                    playerView.player = exoPlayer
+                }
+            },
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                }
         )
 
-        // Overlay transparent Box to capture single-tap (toggle controls) and double-tap (±10s skip)
+        // Overlay transparent Box to capture pinch-to-zoom, pan, single-tap (toggle controls), and double-tap (1x/2.5x zoom)
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
+                .onSizeChanged { newSize ->
+                    containerSize = newSize
+                    if (scale > 1f) {
+                        offset = clampOffset(offset, scale, newSize)
+                    }
+                }
+                .pointerInput(file.absolutePath) {
                     detectTapGestures(
-                        onTap = { onTap() },
-                        onDoubleTap = { offset ->
-                            val isRightSide = offset.x > (size.width / 2)
-                            if (isRightSide) {
-                                performSeek((currentPositionMs + 10_000f).toLong())
+                        onTap = { currentOnTap() },
+                        onDoubleTap = { tapOffset ->
+                            if (scale > 1.02f) {
+                                animateTransformTo(
+                                    targetScale = 1f,
+                                    targetOffset = Offset.Zero,
+                                    zoomed = false
+                                )
                             } else {
-                                performSeek((currentPositionMs - 10_000f).toLong())
+                                val targetScale = 2.5f
+                                val containerCenter = Offset(
+                                    containerSize.width / 2f,
+                                    containerSize.height / 2f
+                                )
+                                val rawTargetOffset = (containerCenter - tapOffset) * (targetScale - 1f)
+                                val clampedTargetOffset = clampOffset(
+                                    target = rawTargetOffset,
+                                    targetScale = targetScale,
+                                    size = containerSize
+                                )
+                                animateTransformTo(
+                                    targetScale = targetScale,
+                                    targetOffset = clampedTargetOffset,
+                                    zoomed = true
+                                )
                             }
                         }
                     )
+                }
+                .pointerInput(file.absolutePath) {
+                    val touchSlop = viewConfiguration.touchSlop
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false)
+                        var wasMultiTouch = false
+                        var pastPanSlop = false
+                        var panAccumulated = Offset.Zero
+
+                        do {
+                            val event = awaitPointerEvent()
+                            val pressedCount = event.changes.count { it.pressed }
+
+                            if (pressedCount >= 2) {
+                                wasMultiTouch = true
+                                animationJob?.cancel()
+
+                                val zoomChange = event.calculateZoom()
+                                val panChange = event.calculatePan()
+                                val centroid = event.calculateCentroid(useCurrent = false)
+
+                                val oldScale = scale
+                                val newScale = (oldScale * zoomChange).coerceIn(0.85f, 5f)
+                                val scaleRatio = if (oldScale > 0f) newScale / oldScale else 1f
+
+                                val newRawOffset = if (centroid != Offset.Unspecified) {
+                                    val containerCenter = Offset(
+                                        containerSize.width / 2f,
+                                        containerSize.height / 2f
+                                    )
+                                    val focalOffset = centroid - containerCenter
+                                    offset + panChange + (offset - focalOffset) * (scaleRatio - 1f)
+                                } else {
+                                    offset + panChange
+                                }
+
+                                scale = newScale
+                                offset = clampOffset(newRawOffset, newScale, containerSize)
+                                currentOnZoomChanged(newScale > 1.02f)
+
+                                event.changes.forEach { it.consume() }
+                            } else if (pressedCount == 1) {
+                                if (scale > 1.02f) {
+                                    val panChange = event.calculatePan()
+                                    if (!pastPanSlop && !wasMultiTouch) {
+                                        panAccumulated += panChange
+                                        if (panAccumulated.getDistance() > touchSlop) {
+                                            pastPanSlop = true
+                                            animationJob?.cancel()
+                                            offset = clampOffset(offset + panChange, scale, containerSize)
+                                            event.changes.forEach { it.consume() }
+                                        }
+                                    } else {
+                                        animationJob?.cancel()
+                                        offset = clampOffset(offset + panChange, scale, containerSize)
+                                        event.changes.forEach { it.consume() }
+                                    }
+                                } else if (wasMultiTouch) {
+                                    // Keep consuming trailing 1-finger movement after pinch-out so pager/dismiss don't trigger
+                                    event.changes.forEach { it.consume() }
+                                }
+                            } else if (wasMultiTouch || pastPanSlop) {
+                                event.changes.forEach { it.consume() }
+                            }
+                        } while (event.changes.any { it.pressed })
+
+                        if (wasMultiTouch && scale <= 1.03f) {
+                            animateTransformTo(
+                                targetScale = 1f,
+                                targetOffset = Offset.Zero,
+                                zoomed = false
+                            )
+                        }
+                    }
                 }
         )
 
