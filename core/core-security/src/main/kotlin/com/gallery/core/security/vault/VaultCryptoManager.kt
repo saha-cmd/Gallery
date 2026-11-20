@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import androidx.security.crypto.EncryptedFile
+import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -80,7 +82,7 @@ class VaultCryptoManager @Inject constructor(
     ): ByteArray = withContext(Dispatchers.IO) {
         destinationFile.parentFile?.mkdirs()
         ByteArrayInputStream(bytes).use { input ->
-            encryptStreamToDestination(input, destinationFile)
+            encryptStreamToDestination(input, destinationFile).first
         }
     }
 
@@ -122,20 +124,29 @@ class VaultCryptoManager @Inject constructor(
         val encryptedFileName = "${UUID.randomUUID()}.vault"
         val vaultDir = File(context.filesDir, "vault").apply { mkdirs() }
         val encryptedFile = File(vaultDir, encryptedFileName)
-        val contentIv = encryptStreamToDestination(inputStream, encryptedFile)
+        try {
+            val (contentIv, totalOriginalSize) = encryptStreamToDestination(inputStream, encryptedFile)
+            if (totalOriginalSize <= 0L || !encryptedFile.exists() || encryptedFile.length() <= 0L) {
+                if (encryptedFile.exists()) encryptedFile.delete()
+                throw IOException("Source media stream was empty (0 bytes)")
+            }
 
-        return VaultEncryptionResult(
-            encryptedFilePath = encryptedFile.absolutePath,
-            originalName = originalName,
-            iv = contentIv,
-            originalSize = encryptedFile.length()
-        )
+            return VaultEncryptionResult(
+                encryptedFilePath = encryptedFile.absolutePath,
+                originalName = originalName,
+                iv = contentIv,
+                originalSize = totalOriginalSize
+            )
+        } catch (e: Exception) {
+            if (encryptedFile.exists()) encryptedFile.delete()
+            throw e
+        }
     }
 
     private fun encryptStreamToDestination(
         inputStream: InputStream,
         destinationFile: File
-    ): ByteArray {
+    ): Pair<ByteArray, Long> {
         // 1. Generate unique 256-bit data key
         val dataKeyBytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
@@ -155,6 +166,8 @@ class VaultCryptoManager @Inject constructor(
         )
 
         destinationFile.parentFile?.mkdirs()
+        var totalOriginalSize = 0L
+
         destinationFile.outputStream().use { fileOut ->
             // Header: Magic (4 bytes) + Version (1 byte)
             fileOut.write(MAGIC_HEADER)
@@ -180,13 +193,14 @@ class VaultCryptoManager @Inject constructor(
                     var bytesRead: Int
                     while (input.read(buffer).also { bytesRead = it } != -1) {
                         cos.write(buffer, 0, bytesRead)
+                        totalOriginalSize += bytesRead
                     }
                 }
                 cos.flush()
             }
         }
 
-        return contentIv
+        return Pair(contentIv, totalOriginalSize)
     }
 
     /**
@@ -221,9 +235,22 @@ class VaultCryptoManager @Inject constructor(
         iv: ByteArray,
         destinationFile: File
     ) = withContext(Dispatchers.IO) {
+        val encFile = File(encryptedFilePath)
+        if (!encFile.exists()) {
+            throw IOException("Encrypted vault file not found: $encryptedFilePath")
+        }
         destinationFile.parentFile?.mkdirs()
-        destinationFile.outputStream().use { out ->
-            decryptToOutputStream(File(encryptedFilePath), iv, out)
+        try {
+            destinationFile.outputStream().use { out ->
+                decryptToOutputStream(encFile, iv, out)
+            }
+            if (!destinationFile.exists() || destinationFile.length() <= 0L) {
+                if (destinationFile.exists()) destinationFile.delete()
+                throw IOException("Decrypted file was empty (0 bytes written from $encryptedFilePath)")
+            }
+        } catch (e: Exception) {
+            if (destinationFile.exists()) destinationFile.delete()
+            throw e
         }
     }
 
@@ -277,7 +304,7 @@ class VaultCryptoManager @Inject constructor(
                 masterCipher.init(Cipher.DECRYPT_MODE, getOrCreateMasterKeyV2(), GCMParameterSpec(128, masterIv))
                 val dataKeyBytes = masterCipher.doFinal(encryptedKey)
 
-                // Stream decrypt content
+                // Explicit chunked streaming with AES/CTR/NoPadding
                 val contentCipher = Cipher.getInstance(CONTENT_TRANSFORMATION)
                 contentCipher.init(
                     Cipher.DECRYPT_MODE,
@@ -285,14 +312,19 @@ class VaultCryptoManager @Inject constructor(
                     IvParameterSpec(contentIv)
                 )
 
-                val cis = CipherInputStream(fileIn, contentCipher)
                 val buffer = ByteArray(BUFFER_SIZE)
                 var bytesRead: Int
-                while (cis.read(buffer).also { bytesRead = it } != -1) {
-                    destinationStream.write(buffer, 0, bytesRead)
+                while (fileIn.read(buffer).also { bytesRead = it } != -1) {
+                    val decryptedChunk = contentCipher.update(buffer, 0, bytesRead)
+                    if (decryptedChunk != null && decryptedChunk.isNotEmpty()) {
+                        destinationStream.write(decryptedChunk)
+                    }
+                }
+                val finalChunk = contentCipher.doFinal()
+                if (finalChunk != null && finalChunk.isNotEmpty()) {
+                    destinationStream.write(finalChunk)
                 }
                 destinationStream.flush()
-                try { cis.close() } catch (_: Exception) {}
             }
             return@withContext
         }
@@ -329,98 +361,163 @@ class VaultCryptoManager @Inject constructor(
         iv: ByteArray,
         destinationFile: File
     ) {
-        val secretKey = getLegacySecretKeyV1()
-            ?: throw IOException("Legacy master key unavailable")
+        val candidateKeys = getAllCandidateKeys()
+        if (candidateKeys.isEmpty()) {
+            throw IOException("Legacy master key unavailable")
+        }
 
         destinationFile.parentFile?.mkdirs()
         var success = false
-        var lastException: Exception? = null
+        val errors = mutableListOf<String>()
 
-        // Strategy 1: Stream using 12-byte IV prepended at beginning of file
-        if (file.length() >= 12 + 16) {
-            try {
-                file.inputStream().use { fileIn ->
-                    val fileIv = ByteArray(12)
-                    readFully(fileIn, fileIv)
-                    val cipher = Cipher.getInstance(MASTER_TRANSFORMATION)
-                    cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, fileIv))
-                    val cis = CipherInputStream(fileIn, cipher)
-                    destinationFile.outputStream().use { fileOut ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        var bytesRead: Int
-                        while (cis.read(buffer).also { bytesRead = it } != -1) {
-                            fileOut.write(buffer, 0, bytesRead)
+        for (secretKey in candidateKeys) {
+            if (success) break
+
+            // Strategy 1: Stream using 12-byte IV prepended at beginning of file
+            if (file.length() >= 12 + 16) {
+                try {
+                    file.inputStream().use { fileIn ->
+                        val fileIv = ByteArray(12)
+                        readFully(fileIn, fileIv)
+                        val cipher = Cipher.getInstance(MASTER_TRANSFORMATION)
+                        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, fileIv))
+                        destinationFile.outputStream().use { fileOut ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            var bytesRead: Int
+                            while (fileIn.read(buffer).also { bytesRead = it } != -1) {
+                                val decrypted = cipher.update(buffer, 0, bytesRead)
+                                if (decrypted != null && decrypted.isNotEmpty()) {
+                                    fileOut.write(decrypted)
+                                }
+                            }
+                            val finalBytes = cipher.doFinal()
+                            if (finalBytes != null && finalBytes.isNotEmpty()) {
+                                fileOut.write(finalBytes)
+                            }
+                            fileOut.flush()
                         }
-                        fileOut.flush()
                     }
-                    try { cis.close() } catch (_: Exception) {}
+                    if (destinationFile.exists() && destinationFile.length() > 0) {
+                        success = true
+                    } else {
+                        destinationFile.delete()
+                    }
+                } catch (e: Exception) {
+                    errors.add("Strategy 1 (${secretKey.algorithm}): ${e.message}")
+                    if (destinationFile.exists()) destinationFile.delete()
                 }
-                if (destinationFile.exists() && destinationFile.length() > 0) {
-                    success = true
+            }
+
+            // Strategy 2: Stream using IV from database entity (skipping 12-byte header if present)
+            if (!success && iv.isNotEmpty() && file.length() >= 12 + 16) {
+                try {
+                    file.inputStream().use { fileIn ->
+                        val skippedIv = ByteArray(12)
+                        readFully(fileIn, skippedIv)
+                        val cipher = Cipher.getInstance(MASTER_TRANSFORMATION)
+                        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+                        destinationFile.outputStream().use { fileOut ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            var bytesRead: Int
+                            while (fileIn.read(buffer).also { bytesRead = it } != -1) {
+                                val decrypted = cipher.update(buffer, 0, bytesRead)
+                                if (decrypted != null && decrypted.isNotEmpty()) {
+                                    fileOut.write(decrypted)
+                                }
+                            }
+                            val finalBytes = cipher.doFinal()
+                            if (finalBytes != null && finalBytes.isNotEmpty()) {
+                                fileOut.write(finalBytes)
+                            }
+                            fileOut.flush()
+                        }
+                    }
+                    if (destinationFile.exists() && destinationFile.length() > 0) {
+                        success = true
+                    } else {
+                        destinationFile.delete()
+                    }
+                } catch (e: Exception) {
+                    errors.add("Strategy 2 (${secretKey.algorithm}): ${e.message}")
+                    if (destinationFile.exists()) destinationFile.delete()
                 }
-            } catch (e: Exception) {
-                lastException = e
-                destinationFile.delete()
+            }
+
+            // Strategy 3: Stream using IV from database entity across entire file
+            if (!success && iv.isNotEmpty() && file.length() >= 16) {
+                try {
+                    file.inputStream().use { fileIn ->
+                        val cipher = Cipher.getInstance(MASTER_TRANSFORMATION)
+                        cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+                        destinationFile.outputStream().use { fileOut ->
+                            val buffer = ByteArray(BUFFER_SIZE)
+                            var bytesRead: Int
+                            while (fileIn.read(buffer).also { bytesRead = it } != -1) {
+                                val decrypted = cipher.update(buffer, 0, bytesRead)
+                                if (decrypted != null && decrypted.isNotEmpty()) {
+                                    fileOut.write(decrypted)
+                                }
+                            }
+                            val finalBytes = cipher.doFinal()
+                            if (finalBytes != null && finalBytes.isNotEmpty()) {
+                                fileOut.write(finalBytes)
+                            }
+                            fileOut.flush()
+                        }
+                    }
+                    if (destinationFile.exists() && destinationFile.length() > 0) {
+                        success = true
+                    } else {
+                        destinationFile.delete()
+                    }
+                } catch (e: Exception) {
+                    errors.add("Strategy 3 (${secretKey.algorithm}): ${e.message}")
+                    if (destinationFile.exists()) destinationFile.delete()
+                }
             }
         }
 
-        // Strategy 2: Stream using IV from database entity (skipping 12-byte header if present)
-        if (!success && iv.isNotEmpty() && file.length() >= 12 + 16) {
+        // Strategy 4: Fallback for androidx.security.crypto.EncryptedFile
+        if (!success) {
             try {
-                file.inputStream().use { fileIn ->
-                    val skippedIv = ByteArray(12)
-                    readFully(fileIn, skippedIv)
-                    val cipher = Cipher.getInstance(MASTER_TRANSFORMATION)
-                    cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
-                    val cis = CipherInputStream(fileIn, cipher)
-                    destinationFile.outputStream().use { fileOut ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        var bytesRead: Int
-                        while (cis.read(buffer).also { bytesRead = it } != -1) {
-                            fileOut.write(buffer, 0, bytesRead)
-                        }
-                        fileOut.flush()
+                val masterKey = MasterKey.Builder(context)
+                    .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+                    .build()
+                val encFile = EncryptedFile.Builder(
+                    context,
+                    file,
+                    masterKey,
+                    EncryptedFile.FileEncryptionScheme.AES256_GCM_HKDF_4KB
+                ).build()
+                encFile.openFileInput().use { input ->
+                    destinationFile.outputStream().use { output ->
+                        input.copyTo(output)
                     }
-                    try { cis.close() } catch (_: Exception) {}
                 }
                 if (destinationFile.exists() && destinationFile.length() > 0) {
                     success = true
+                } else {
+                    destinationFile.delete()
                 }
             } catch (e: Exception) {
-                lastException = e
-                destinationFile.delete()
-            }
-        }
-
-        // Strategy 3: Stream using IV from database entity across entire file
-        if (!success && iv.isNotEmpty() && file.length() >= 16) {
-            try {
-                file.inputStream().use { fileIn ->
-                    val cipher = Cipher.getInstance(MASTER_TRANSFORMATION)
-                    cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
-                    val cis = CipherInputStream(fileIn, cipher)
-                    destinationFile.outputStream().use { fileOut ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        var bytesRead: Int
-                        while (cis.read(buffer).also { bytesRead = it } != -1) {
-                            fileOut.write(buffer, 0, bytesRead)
-                        }
-                        fileOut.flush()
-                    }
-                    try { cis.close() } catch (_: Exception) {}
-                }
-                if (destinationFile.exists() && destinationFile.length() > 0) {
-                    success = true
-                }
-            } catch (e: Exception) {
-                lastException = e
-                destinationFile.delete()
+                errors.add("Strategy 4 (EncryptedFile): ${e.message}")
+                if (destinationFile.exists()) destinationFile.delete()
             }
         }
 
         if (!success) {
-            throw lastException ?: IOException("Failed to decrypt legacy file")
+            if (destinationFile.exists()) destinationFile.delete()
+            throw IOException("Failed to decrypt legacy file (${file.length()} bytes): ${errors.joinToString("; ")}")
         }
+    }
+
+    private fun getAllCandidateKeys(): List<SecretKey> {
+        val keys = mutableListOf<SecretKey>()
+        getLegacySecretKeyV1()?.let { keys.add(it) }
+        try {
+            keys.add(getOrCreateMasterKeyV2())
+        } catch (_: Exception) {}
+        return keys
     }
 
     private fun getOrCreateMasterKeyV2(): SecretKey {

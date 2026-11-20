@@ -103,7 +103,12 @@ class EditorViewModel @Inject constructor(
             val result = withContext(Dispatchers.IO) {
                 try {
                     // 1. Decode original bitmap
-                    val inputStream = context.contentResolver.openInputStream(sourceUri)
+                    val inputStream = if (sourceUri.scheme == "file" || sourceUri.path?.startsWith("/") == true) {
+                        val file = if (sourceUri.scheme == "file") File(sourceUri.path ?: "") else File(sourceUri.toString())
+                        if (file.exists()) java.io.FileInputStream(file) else context.contentResolver.openInputStream(sourceUri)
+                    } else {
+                        context.contentResolver.openInputStream(sourceUri)
+                    }
                     val originalBitmap = BitmapFactory.decodeStream(inputStream)
                     inputStream?.close()
 

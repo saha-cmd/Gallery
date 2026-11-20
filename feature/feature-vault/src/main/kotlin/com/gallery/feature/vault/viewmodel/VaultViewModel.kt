@@ -4,6 +4,8 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
+import android.os.Build
+import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallery.core.domain.model.VaultItem
@@ -21,6 +23,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -58,6 +61,7 @@ data class VaultUiState(
     val infoMessage: String? = null,
     val previewFiles: Map<String, File> = emptyMap(),
     val previewBytes: Map<String, ByteArray> = emptyMap(),
+    val previewBitmaps: Map<String, Bitmap> = emptyMap(),
     val corruptedItemIds: Set<String> = emptySet(),
     val activeViewingItem: VaultItem? = null,
     val activeViewingFile: File? = null,
@@ -260,6 +264,7 @@ class VaultViewModel @Inject constructor(
 
     fun loadVaultItems() {
         viewModelScope.launch {
+            _vaultState.update { it.copy(corruptedItemIds = emptySet()) }
             getVaultItemsUseCase()
                 .catch { e -> _vaultState.update { it.copy(error = e.message, isLoading = false) } }
                 .collect { items ->
@@ -284,6 +289,79 @@ class VaultViewModel @Inject constructor(
                     }
                 }
         }
+    }
+
+    private fun extractVideoThumbnail(file: File): Bitmap? {
+        if (!file.exists() || file.length() <= 0L) return null
+        var bitmap: Bitmap? = null
+        val retriever = MediaMetadataRetriever()
+        try {
+            java.io.FileInputStream(file).use { fis ->
+                retriever.setDataSource(fis.fd)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                try {
+                    bitmap = retriever.getScaledFrameAtTime(
+                        1_000_000L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        256,
+                        256
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.getFrameAtTime(
+                        1_000_000L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.getFrameAtTime(
+                        0L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.getFrameAtTime(
+                        0L,
+                        MediaMetadataRetriever.OPTION_CLOSEST
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.frameAtTime
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+
+        if (bitmap == null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    bitmap = android.media.ThumbnailUtils.createVideoThumbnail(
+                        file,
+                        android.util.Size(256, 256),
+                        null
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    bitmap = android.media.ThumbnailUtils.createVideoThumbnail(
+                        file.absolutePath,
+                        MediaStore.Images.Thumbnails.MINI_KIND
+                    )
+                }
+            } catch (_: Exception) {}
+        }
+
+        return bitmap
     }
 
     private val _isLaunchingEditor = MutableStateFlow(false)
@@ -312,7 +390,16 @@ class VaultViewModel @Inject constructor(
     fun onLeaveVaultScreen() {
         purgeSecureTempFiles()
         _sessionAuthState.value = VaultAuthState.Idle
-        _vaultState.update { it.copy(previewBytes = emptyMap(), decryptedFiles = emptyMap(), activeViewingItem = null, activeViewingFile = null, selectedItemIds = emptySet()) }
+        _vaultState.update {
+            it.copy(
+                previewBytes = emptyMap(),
+                previewBitmaps = emptyMap(),
+                decryptedFiles = emptyMap(),
+                activeViewingItem = null,
+                activeViewingFile = null,
+                selectedItemIds = emptySet()
+            )
+        }
     }
 
     fun onAppBackgrounded() {
@@ -323,6 +410,7 @@ class VaultViewModel @Inject constructor(
         _vaultState.update {
             it.copy(
                 previewBytes = emptyMap(),
+                previewBitmaps = emptyMap(),
                 previewFiles = emptyMap(),
                 decryptedFiles = emptyMap(),
                 activeViewingItem = null,
@@ -337,6 +425,8 @@ class VaultViewModel @Inject constructor(
 
     fun requestPreview(item: VaultItem) {
         if (item.id in _vaultState.value.previewBytes ||
+            item.id in _vaultState.value.previewBitmaps ||
+            item.id in _vaultState.value.previewFiles ||
             item.id in _vaultState.value.corruptedItemIds ||
             activePreviewJobs.containsKey(item.id)) {
             return
@@ -345,7 +435,7 @@ class VaultViewModel @Inject constructor(
         val job = viewModelScope.launch(Dispatchers.IO) {
             val currentJob = coroutineContext[Job]
             try {
-                // 1. Fetch encrypted thumbnail directly decrypted in memory as ByteArray (zero disk exposure)
+                // 1. Fetch encrypted thumbnail directly decrypted in memory as ByteArray
                 val thumbBytes = vaultRepository.getThumbnailBytes(item)
                 if (thumbBytes != null && thumbBytes.isNotEmpty()) {
                     if (isActive) {
@@ -358,7 +448,30 @@ class VaultViewModel @Inject constructor(
                     return@launch
                 }
 
-                // 2. If thumbnail bytes unavailable, mark corrupted or retry
+                // 2. If thumbnail bytes unavailable, get decrypted temp file
+                val tempResult = vaultRepository.getDecryptedTempFile(item)
+                if (tempResult.isSuccess) {
+                    val file = tempResult.getOrNull()
+                    if (file != null && file.exists() && file.length() > 0L) {
+                        var extractedBitmap: Bitmap? = null
+                        if (item.isVideo) {
+                            extractedBitmap = extractVideoThumbnail(file)
+                        }
+                        if (isActive) {
+                            _vaultState.update { current ->
+                                current.copy(
+                                    previewFiles = current.previewFiles + (item.id to file),
+                                    previewBitmaps = if (extractedBitmap != null) {
+                                        current.previewBitmaps + (item.id to extractedBitmap)
+                                    } else current.previewBitmaps
+                                )
+                            }
+                        }
+                        return@launch
+                    }
+                }
+
+                // 3. ONLY add to corruptedItemIds if getDecryptedTempFile itself failed!
                 if (isActive) {
                     _vaultState.update { current ->
                         current.copy(corruptedItemIds = current.corruptedItemIds + item.id)
@@ -381,6 +494,7 @@ class VaultViewModel @Inject constructor(
         _vaultState.update { current ->
             current.copy(
                 previewBytes = current.previewBytes - itemId,
+                previewBitmaps = current.previewBitmaps - itemId,
                 previewFiles = current.previewFiles - itemId
             )
         }
@@ -422,14 +536,14 @@ class VaultViewModel @Inject constructor(
     fun prepareViewingFiles(items: List<VaultItem>, currentIndex: Int) {
         val currentItem = items.getOrNull(currentIndex) ?: return
         val cachedCurrent = _vaultState.value.decryptedFiles[currentItem.id]
-        if (cachedCurrent != null && cachedCurrent.exists()) {
-            _vaultState.update { it.copy(activeViewingItem = currentItem, activeViewingFile = cachedCurrent, isPreparingViewer = false) }
+        if (cachedCurrent != null && cachedCurrent.exists() && cachedCurrent.length() > 0L) {
+            _vaultState.update { it.copy(activeViewingItem = currentItem, activeViewingFile = cachedCurrent, isPreparingViewer = false, error = null) }
         } else {
             _vaultState.update { it.copy(activeViewingItem = currentItem, isPreparingViewer = true) }
             viewModelScope.launch(Dispatchers.IO) {
                 val result = vaultRepository.getDecryptedTempFile(currentItem)
                 result.onSuccess { file ->
-                    _vaultState.update { it.copy(activeViewingFile = file, decryptedFiles = it.decryptedFiles + (currentItem.id to file), isPreparingViewer = false) }
+                    _vaultState.update { it.copy(activeViewingFile = file, decryptedFiles = it.decryptedFiles + (currentItem.id to file), isPreparingViewer = false, error = null) }
                 }.onFailure { err ->
                     _vaultState.update { it.copy(isPreparingViewer = false, error = "Failed to decrypt: ${err.message}") }
                 }
@@ -441,7 +555,7 @@ class VaultViewModel @Inject constructor(
         for (idx in neighborIndices) {
             val neighbor = items.getOrNull(idx) ?: continue
             val existingNeighbor = _vaultState.value.decryptedFiles[neighbor.id]
-            if (existingNeighbor == null || !existingNeighbor.exists()) {
+            if (existingNeighbor == null || !existingNeighbor.exists() || existingNeighbor.length() == 0L) {
                 viewModelScope.launch(Dispatchers.IO) {
                     vaultRepository.getDecryptedTempFile(neighbor).onSuccess { file ->
                         _vaultState.update { it.copy(decryptedFiles = it.decryptedFiles + (neighbor.id to file)) }
@@ -462,10 +576,32 @@ class VaultViewModel @Inject constructor(
                 _vaultState.update { it.copy(activeViewingItem = item, isPreparingViewer = true) }
                 val result = vaultRepository.getDecryptedTempFile(item)
                 result.onSuccess { file ->
-                    _vaultState.update { it.copy(activeViewingFile = file, decryptedFiles = it.decryptedFiles + (item.id to file), isPreparingViewer = false) }
+                    _vaultState.update { it.copy(activeViewingFile = file, decryptedFiles = it.decryptedFiles + (item.id to file), isPreparingViewer = false, error = null) }
                 }.onFailure { err ->
                     _vaultState.update { it.copy(isPreparingViewer = false, error = "Failed to decrypt: ${err.message}") }
                 }
+            }
+        }
+    }
+
+    fun editItem(item: VaultItem, onReady: (File, Boolean) -> Unit) {
+        val existing = _vaultState.value.decryptedFiles[item.id] ?: _vaultState.value.previewFiles[item.id]
+        if (existing != null && existing.exists() && existing.length() > 0L) {
+            setLaunchingEditor(true)
+            onReady(existing, item.isVideo)
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            _vaultState.update { it.copy(isLoading = true) }
+            val result = vaultRepository.getDecryptedTempFile(item)
+            result.onSuccess { file ->
+                _vaultState.update { it.copy(isLoading = false, decryptedFiles = it.decryptedFiles + (item.id to file)) }
+                setLaunchingEditor(true)
+                withContext(Dispatchers.Main) {
+                    onReady(file, item.isVideo)
+                }
+            }.onFailure { err ->
+                _vaultState.update { it.copy(isLoading = false, error = "Failed to decrypt for edit: ${err.message}") }
             }
         }
     }
@@ -485,6 +621,7 @@ class VaultViewModel @Inject constructor(
                     it.copy(
                         isLoading = false,
                         previewBytes = it.previewBytes - item.id,
+                        previewBitmaps = it.previewBitmaps - item.id,
                         previewFiles = it.previewFiles - item.id,
                         decryptedFiles = it.decryptedFiles - item.id,
                         corruptedItemIds = it.corruptedItemIds - item.id,
@@ -546,6 +683,7 @@ class VaultViewModel @Inject constructor(
                     activeViewingItem = nextItem,
                     activeViewingFile = if (nextItem != null) it.decryptedFiles[nextItem.id] else null,
                     previewBytes = it.previewBytes - item.id,
+                    previewBitmaps = it.previewBitmaps - item.id,
                     previewFiles = it.previewFiles - item.id,
                     decryptedFiles = it.decryptedFiles - item.id,
                     corruptedItemIds = it.corruptedItemIds - item.id,
@@ -580,6 +718,7 @@ class VaultViewModel @Inject constructor(
                     isLoading = false,
                     selectedItemIds = emptySet(),
                     previewBytes = current.previewBytes - restoredIds,
+                    previewBitmaps = current.previewBitmaps - restoredIds,
                     previewFiles = current.previewFiles - restoredIds,
                     decryptedFiles = current.decryptedFiles - restoredIds,
                     corruptedItemIds = current.corruptedItemIds - restoredIds,
@@ -617,6 +756,7 @@ class VaultViewModel @Inject constructor(
                     albums = updatedAlbums,
                     selectedItemIds = emptySet(),
                     previewBytes = current.previewBytes - targetIds,
+                    previewBitmaps = current.previewBitmaps - targetIds,
                     previewFiles = current.previewFiles - targetIds,
                     decryptedFiles = current.decryptedFiles - targetIds,
                     corruptedItemIds = current.corruptedItemIds - targetIds,

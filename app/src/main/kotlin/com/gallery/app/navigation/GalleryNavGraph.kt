@@ -167,8 +167,8 @@ fun GalleryNavGraph(navController: NavHostController) {
         ) {
             VaultScreen(
                 onBack = { navController.popBackStack() },
-                onEditItem = { uri ->
-                    navController.navigate(Screen.Editor.createRoute(uri, isVideo = false, isVault = true))
+                onEditItem = { uri, isVideo ->
+                    navController.navigate(Screen.Editor.createRoute(uri, isVideo = isVideo, isVault = true))
                 }
             )
         }

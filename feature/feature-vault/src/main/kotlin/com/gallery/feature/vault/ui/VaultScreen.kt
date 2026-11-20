@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -50,6 +51,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -111,7 +113,7 @@ import kotlin.math.absoluteValue
 @Composable
 fun VaultScreen(
     onBack: () -> Unit,
-    onEditItem: (String) -> Unit = {},
+    onEditItem: (String, Boolean) -> Unit = { _, _ -> },
     viewModel: VaultViewModel = hiltViewModel()
 ) {
     val vaultState by viewModel.vaultState.collectAsStateWithLifecycle()
@@ -120,6 +122,7 @@ fun VaultScreen(
     val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
     var itemToDelete by remember { mutableStateOf<VaultItem?>(null) }
+    var itemInfoToShow by remember { mutableStateOf<VaultItem?>(null) }
     var showBatchDeleteDialog by remember { mutableStateOf(false) }
     var showVaultMenu by remember { mutableStateOf(false) }
     var showChangePinDialog by remember { mutableStateOf(false) }
@@ -375,6 +378,7 @@ fun VaultScreen(
                                         item = vaultItem,
                                         previewFile = vaultState.previewFiles[vaultItem.id],
                                         previewBytes = vaultState.previewBytes[vaultItem.id],
+                                        previewBitmap = vaultState.previewBitmaps[vaultItem.id],
                                         isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
                                         isScrolling = effectiveScrolling,
                                         isPreviewLayer = isPreviewLayer,
@@ -396,6 +400,12 @@ fun VaultScreen(
                                         onLongClick = {
                                             viewModel.toggleSelection(vaultItem.id)
                                         },
+                                        onEdit = {
+                                            viewModel.editItem(vaultItem) { file, isVideo ->
+                                                onEditItem(Uri.fromFile(file).toString(), isVideo)
+                                            }
+                                        },
+                                        onInfo = { itemInfoToShow = vaultItem },
                                         onRestore = { viewModel.restoreItemToGallery(vaultItem) },
                                         onDelete = { itemToDelete = vaultItem }
                                     )
@@ -478,6 +488,7 @@ fun VaultScreen(
                                                 item = vaultItem,
                                                 previewFile = vaultState.previewFiles[vaultItem.id],
                                                 previewBytes = vaultState.previewBytes[vaultItem.id],
+                                                previewBitmap = vaultState.previewBitmaps[vaultItem.id],
                                                 isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
                                                 isScrolling = effectiveScrolling,
                                                 isPreviewLayer = isPreviewLayer,
@@ -499,6 +510,12 @@ fun VaultScreen(
                                                 onLongClick = {
                                                     viewModel.toggleSelection(vaultItem.id)
                                                 },
+                                                onEdit = {
+                                                    viewModel.editItem(vaultItem) { file, isVideo ->
+                                                        onEditItem(Uri.fromFile(file).toString(), isVideo)
+                                                    }
+                                                },
+                                                onInfo = { itemInfoToShow = vaultItem },
                                                 onRestore = { viewModel.restoreItemToGallery(vaultItem) },
                                                 onDelete = { itemToDelete = vaultItem }
                                             )
@@ -555,6 +572,7 @@ fun VaultScreen(
                                                     album = album,
                                                     coverFile = album.coverItem?.let { vaultState.previewFiles[it.id] },
                                                     coverBytes = album.coverItem?.let { vaultState.previewBytes[it.id] },
+                                                    coverBitmap = album.coverItem?.let { vaultState.previewBitmaps[it.id] },
                                                     isScrolling = isAlbumsScrolling,
                                                     onRequestPreview = { viewModel.requestPreview(it) },
                                                     onReleasePreview = { viewModel.releasePreview(it.id) },
@@ -587,9 +605,9 @@ fun VaultScreen(
                     onPageChanged = { index -> viewModel.prepareViewingFiles(displayedItems, index) },
                     onClose = viewModel::closeViewer,
                     onRestore = { item -> viewModel.restoreItemToGallery(item) },
-                    onEdit = { file ->
+                    onEdit = { file, isVideo ->
                         viewModel.setLaunchingEditor(true)
-                        onEditItem(Uri.fromFile(file).toString())
+                        onEditItem(Uri.fromFile(file).toString(), isVideo)
                     },
                     onDelete = { item -> itemToDelete = item }
                 )
@@ -634,6 +652,14 @@ fun VaultScreen(
                     Text("Cancel")
                 }
             }
+        )
+    }
+
+    if (itemInfoToShow != null) {
+        VaultInfoBottomSheet(
+            item = itemInfoToShow!!,
+            decryptedFile = vaultState.decryptedFiles[itemInfoToShow!!.id] ?: vaultState.previewFiles[itemInfoToShow!!.id],
+            onDismissRequest = { itemInfoToShow = null }
         )
     }
 
@@ -769,6 +795,7 @@ fun VaultScreen(
 @Composable
 private fun VaultAlbumCard(
     album: VaultAlbum,
+    coverBitmap: Bitmap? = null,
     coverFile: File? = null,
     coverBytes: ByteArray? = null,
     onClick: () -> Unit,
@@ -800,8 +827,8 @@ private fun VaultAlbumCard(
             }
         }
     }
-    LaunchedEffect(coverItem?.id, shouldLoad, coverBytes, coverFile) {
-        if (shouldLoad && coverItem != null && coverBytes == null && coverFile == null) {
+    LaunchedEffect(coverItem?.id, shouldLoad, coverBitmap, coverBytes, coverFile) {
+        if (shouldLoad && coverItem != null && coverBitmap == null && coverBytes == null && coverFile == null) {
             onRequestPreview(coverItem)
         }
     }
@@ -822,7 +849,14 @@ private fun VaultAlbumCard(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                if (shouldLoad && ((coverBytes != null && coverBytes.isNotEmpty()) || (coverFile != null && coverFile.exists()))) {
+                if (shouldLoad && coverBitmap != null) {
+                    Image(
+                        bitmap = coverBitmap.asImageBitmap(),
+                        contentDescription = album.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else if (shouldLoad && ((coverBytes != null && coverBytes.isNotEmpty()) || (coverFile != null && coverFile.exists()))) {
                     val thumbRequest = remember(coverBytes, coverFile?.absolutePath, cacheKey) {
                         ImageRequest.Builder(context)
                             .data(coverBytes ?: coverFile)
@@ -874,12 +908,15 @@ private fun VaultAlbumCard(
 @Composable
 private fun VaultThumbnailCard(
     item: VaultItem,
+    previewBitmap: Bitmap? = null,
     previewFile: File? = null,
     previewBytes: ByteArray? = null,
     isCorrupted: Boolean,
     onClick: () -> Unit,
     onRestore: () -> Unit,
     onDelete: () -> Unit,
+    onEdit: () -> Unit = {},
+    onInfo: () -> Unit = {},
     isScrolling: Boolean = false,
     isPreviewLayer: Boolean = false,
     activeRefCounts: MutableMap<String, Int>? = null,
@@ -927,8 +964,8 @@ private fun VaultThumbnailCard(
             }
         }
     }
-    LaunchedEffect(item.id, shouldLoad, previewBytes, previewFile) {
-        if (shouldLoad && previewBytes == null && previewFile == null) {
+    LaunchedEffect(item.id, shouldLoad, previewBitmap, previewBytes, previewFile) {
+        if (shouldLoad && previewBitmap == null && previewBytes == null && previewFile == null) {
             onRequestPreview()
         }
     }
@@ -946,7 +983,14 @@ private fun VaultThumbnailCard(
             )
     ) {
         if (shouldLoad) {
-            if ((previewBytes != null && previewBytes.isNotEmpty()) || (previewFile != null && previewFile.exists())) {
+            if (previewBitmap != null) {
+                Image(
+                    bitmap = previewBitmap.asImageBitmap(),
+                    contentDescription = item.originalName,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else if ((previewBytes != null && previewBytes.isNotEmpty()) || (previewFile != null && previewFile.exists())) {
                 val decodeSize = if (isPreviewLayer) 110 else targetSize
                 val thumbRequest = remember(previewBytes, previewFile?.absolutePath, item.id, decodeSize) {
                     ImageRequest.Builder(context)
@@ -1110,6 +1154,22 @@ private fun VaultThumbnailCard(
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
                 ) {
                     DropdownMenuItem(
+                        text = { Text("Edit") },
+                        leadingIcon = { Icon(Icons.Outlined.Edit, null) },
+                        onClick = {
+                            showMenu = false
+                            onEdit()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Details") },
+                        leadingIcon = { Icon(Icons.Outlined.Info, null) },
+                        onClick = {
+                            showMenu = false
+                            onInfo()
+                        }
+                    )
+                    DropdownMenuItem(
                         text = { Text("Take Out of Secure Folder") },
                         leadingIcon = { Icon(Icons.Outlined.LockOpen, null) },
                         onClick = {
@@ -1141,7 +1201,7 @@ private fun VaultMediaViewer(
     onPageChanged: (Int) -> Unit,
     onClose: () -> Unit,
     onRestore: (VaultItem) -> Unit,
-    onEdit: (File) -> Unit,
+    onEdit: (File, Boolean) -> Unit,
     onDelete: (VaultItem) -> Unit
 ) {
     val initialIndex = remember(initialItem.id) {
@@ -1327,10 +1387,14 @@ private fun VaultMediaViewer(
                             Icon(Icons.Outlined.LockOpen, contentDescription = "Take Out of Secure Folder", tint = Color.White)
                         }
 
-                        // Edit Photo (photos only)
-                        if (!currentItem.isVideo && currentDecryptedFile != null) {
-                            IconButton(onClick = { onEdit(currentDecryptedFile) }) {
-                                Icon(Icons.Outlined.Edit, contentDescription = "Edit photo", tint = Color.White)
+                        // Edit Photo / Video
+                        if (currentDecryptedFile != null && currentDecryptedFile.exists() && currentDecryptedFile.length() > 0L) {
+                            IconButton(onClick = { onEdit(currentDecryptedFile, currentItem.isVideo) }) {
+                                Icon(
+                                    Icons.Outlined.Edit,
+                                    contentDescription = if (currentItem.isVideo) "Edit video" else "Edit photo",
+                                    tint = Color.White
+                                )
                             }
                         }
 
@@ -1671,7 +1735,9 @@ private fun VaultVideoPlayer(
     val fileDuration = remember(file.absolutePath) {
         try {
             val retriever = android.media.MediaMetadataRetriever()
-            retriever.setDataSource(file.absolutePath)
+            java.io.FileInputStream(file).use { fis ->
+                retriever.setDataSource(fis.fd)
+            }
             val time = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)
             retriever.release()
             time?.toLongOrNull() ?: 0L

@@ -31,12 +31,16 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
 import java.security.MessageDigest
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -51,6 +55,7 @@ class VaultRepositoryImpl @Inject constructor(
 
     companion object {
         private val PIN_KEY = stringPreferencesKey("vault_pin_hash")
+        private val itemMutexes = ConcurrentHashMap<String, Mutex>()
     }
 
     init {
@@ -63,9 +68,15 @@ class VaultRepositoryImpl @Inject constructor(
         try {
             val thumbDir = File(context.filesDir, "vault/thumbnails")
             if (thumbDir.exists()) {
-                val legacyFiles = thumbDir.listFiles { _, name -> name.endsWith(".jpg", ignoreCase = true) }
+                val legacyFiles = thumbDir.listFiles { _, name ->
+                    name.endsWith(".jpg", ignoreCase = true) || name.endsWith(".vthumb", ignoreCase = true)
+                }
                 legacyFiles?.forEach { file ->
-                    try { file.delete() } catch (_: Exception) {}
+                    try {
+                        if (file.name.endsWith(".jpg", ignoreCase = true) || file.length() == 0L) {
+                            file.delete()
+                        }
+                    } catch (_: Exception) {}
                 }
             }
         } catch (_: Exception) {}
@@ -190,10 +201,11 @@ class VaultRepositoryImpl @Inject constructor(
                     val committedItems = commitPendingItems(stagedItems)
                     for (item in stagedItems) {
                         try {
-                            if (!item.diskPath.isNullOrEmpty()) {
-                                val file = File(item.diskPath)
+                            val diskPath = item.diskPath
+                            if (!diskPath.isNullOrEmpty()) {
+                                val file = File(diskPath)
                                 if (file.exists()) file.delete()
-                                android.media.MediaScannerConnection.scanFile(context, arrayOf(item.diskPath), null, null)
+                                android.media.MediaScannerConnection.scanFile(context, arrayOf(diskPath), null, null)
                             }
                         } catch (_: Exception) {}
                         try {
@@ -213,8 +225,9 @@ class VaultRepositoryImpl @Inject constructor(
                     var allDeleted = true
                     for (item in stagedItems) {
                         try {
-                            if (!item.diskPath.isNullOrEmpty()) {
-                                val file = File(item.diskPath)
+                            val diskPath = item.diskPath
+                            if (!diskPath.isNullOrEmpty()) {
+                                val file = File(diskPath)
                                 if (file.exists()) file.delete()
                             }
                             val count = context.contentResolver.delete(item.sourceUri, null, null)
@@ -341,9 +354,10 @@ class VaultRepositoryImpl @Inject constructor(
                 // Android delete dialog has already deleted the MediaStore item upon user tapping Yes.
                 // Finalize cleaning any residual physical disk file if accessible.
                 for (item in pendingItems) {
-                    if (!item.diskPath.isNullOrEmpty()) {
+                    val diskPath = item.diskPath
+                    if (!diskPath.isNullOrEmpty()) {
                         try {
-                            val f = File(item.diskPath)
+                            val f = File(diskPath)
                             if (f.exists()) f.delete()
                         } catch (_: Exception) {}
                     }
@@ -504,32 +518,46 @@ class VaultRepositoryImpl @Inject constructor(
 
     override suspend fun getDecryptedTempFile(vaultItem: VaultItem): Result<File> =
         withContext(Dispatchers.IO) {
-            try {
-                val cacheFolder = File(context.cacheDir, "vault_secure_temp").apply { mkdirs() }
-                cryptoManager.ensureNomediaMarkers()
-                val ext = if (vaultItem.isVideo) ".mp4" else ".jpg"
-                val tempFile = File(cacheFolder, "vault_temp_${vaultItem.id}$ext")
-                if (!tempFile.exists() || tempFile.length() == 0L) {
-                    val workFile = File(cacheFolder, "vault_work_${vaultItem.id}.tmp")
-                    if (workFile.exists()) workFile.delete()
-                    cryptoManager.decryptToFile(vaultItem.encryptedFilePath, vaultItem.iv, workFile)
-                    if (workFile.exists() && workFile.length() > 0) {
-                        if (tempFile.exists()) tempFile.delete()
-                        if (!workFile.renameTo(tempFile)) {
-                            workFile.copyTo(tempFile, overwrite = true)
-                            workFile.delete()
+            val mutex = itemMutexes.computeIfAbsent(vaultItem.id) { Mutex() }
+            mutex.withLock {
+                try {
+                    val cacheFolder = File(context.cacheDir, "vault_secure_temp").apply { mkdirs() }
+                    cryptoManager.ensureNomediaMarkers()
+                    val ext = if (vaultItem.isVideo) ".mp4" else ".jpg"
+                    val tempFile = File(cacheFolder, "vault_temp_${vaultItem.id}$ext")
+
+                    if (tempFile.exists()) {
+                        if (tempFile.length() > 0L) {
+                            return@withLock Result.success(tempFile)
+                        } else {
+                            tempFile.delete()
                         }
-                    } else {
-                        throw IOException("Decrypted file was empty")
                     }
+
+                    val partFile = File(cacheFolder, "vault_temp_${vaultItem.id}_${System.nanoTime()}.part")
+                    try {
+                        cryptoManager.decryptToFile(vaultItem.encryptedFilePath, vaultItem.iv, partFile)
+                        if (!partFile.exists() || partFile.length() <= 0L) {
+                            if (partFile.exists()) partFile.delete()
+                            return@withLock Result.failure(IOException("Decrypted file was empty"))
+                        }
+                        if (tempFile.exists()) tempFile.delete()
+                        if (!partFile.renameTo(tempFile)) {
+                            partFile.copyTo(tempFile, overwrite = true)
+                            partFile.delete()
+                        }
+                        if (tempFile.exists() && tempFile.length() > 0L) {
+                            Result.success(tempFile)
+                        } else {
+                            Result.failure(IOException("Decrypted file missing after move"))
+                        }
+                    } catch (e: Exception) {
+                        if (partFile.exists()) partFile.delete()
+                        Result.failure(e)
+                    }
+                } catch (e: Exception) {
+                    Result.failure(e)
                 }
-                if (tempFile.exists() && tempFile.length() > 0) {
-                    Result.success(tempFile)
-                } else {
-                    Result.failure(IOException("Decrypted file missing"))
-                }
-            } catch (e: Exception) {
-                Result.failure(e)
             }
         }
 
@@ -581,30 +609,46 @@ class VaultRepositoryImpl @Inject constructor(
     }
 
     override fun getThumbnailFile(vaultItem: VaultItem): File? {
-        // Plaintext thumbnails on disk are prohibited; returns null to enforce in-memory preview
+        val legacyJpg = File(context.filesDir, "vault/thumbnails/${vaultItem.id}.jpg")
+        if (legacyJpg.exists()) {
+            if (legacyJpg.length() > 0L) {
+                return legacyJpg
+            } else {
+                legacyJpg.delete()
+            }
+        }
         return null
     }
 
     override suspend fun getThumbnailBytes(vaultItem: VaultItem): ByteArray? =
         withContext(Dispatchers.IO) {
             try {
-                val thumbDir = File(context.filesDir, "vault/thumbnails")
+                val thumbDir = File(context.filesDir, "vault/thumbnails").apply { mkdirs() }
                 val vthumbFile = File(thumbDir, "${vaultItem.id}.vthumb")
-                if (vthumbFile.exists() && vthumbFile.length() > 0) {
-                    return@withContext cryptoManager.decryptBytesFromVaultFile(vthumbFile)
+                if (vthumbFile.exists()) {
+                    if (vthumbFile.length() > 0L) {
+                        try {
+                            val decrypted = cryptoManager.decryptBytesFromVaultFile(vthumbFile)
+                            if (decrypted.isNotEmpty()) {
+                                return@withContext decrypted
+                            }
+                        } catch (_: Exception) {}
+                    }
+                    try { vthumbFile.delete() } catch (_: Exception) {}
                 }
 
-                // If .vthumb does not exist, decrypt original media to stream and generate encrypted .vthumb
-                val rawBytes = cryptoManager.decryptFromVault(vaultItem.encryptedFilePath, vaultItem.iv)
-                if (rawBytes.isNotEmpty()) {
-                    val bmp = if (vaultItem.isVideo) {
-                        null // For video without vthumb, skip or generate on demand
+                // If .vthumb does not exist, decrypt safely via getDecryptedTempFile (no OOM on large videos/photos)
+                val tempResult = getDecryptedTempFile(vaultItem)
+                val tempFile = tempResult.getOrNull()
+                if (tempFile != null && tempFile.exists() && tempFile.length() > 0L) {
+                    val bmp: Bitmap? = if (vaultItem.isVideo) {
+                        extractVideoThumbnail(tempFile)
                     } else {
                         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, bounds)
+                        BitmapFactory.decodeFile(tempFile.absolutePath, bounds)
                         var sampleSize = 1
                         if (bounds.outWidth > 0 && bounds.outHeight > 0) {
-                            while (bounds.outWidth / (sampleSize * 2) >= 256 && bounds.outHeight / (sampleSize * 2) >= 256) {
+                            while (bounds.outWidth / (sampleSize * 2) >= 320 && bounds.outHeight / (sampleSize * 2) >= 320) {
                                 sampleSize *= 2
                             }
                         }
@@ -612,7 +656,7 @@ class VaultRepositoryImpl @Inject constructor(
                             inSampleSize = sampleSize
                             inPreferredConfig = Bitmap.Config.RGB_565
                         }
-                        BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.size, decodeOpts)
+                        BitmapFactory.decodeFile(tempFile.absolutePath, decodeOpts)
                     }
 
                     if (bmp != null) {
@@ -621,7 +665,20 @@ class VaultRepositoryImpl @Inject constructor(
                         val thumbBytes = bos.toByteArray()
                         bmp.recycle()
                         vthumbFile.parentFile?.mkdirs()
-                        cryptoManager.encryptBytesToVaultFile(thumbBytes, vthumbFile)
+                        val partFile = File(thumbDir, "${vaultItem.id}_${System.nanoTime()}.vthumb.part")
+                        try {
+                            cryptoManager.encryptBytesToVaultFile(thumbBytes, partFile)
+                            if (partFile.exists() && partFile.length() > 0L) {
+                                if (vthumbFile.exists()) vthumbFile.delete()
+                                if (!partFile.renameTo(vthumbFile)) {
+                                    partFile.copyTo(vthumbFile, overwrite = true)
+                                    partFile.delete()
+                                }
+                            }
+                        } catch (_: Exception) {
+                        } finally {
+                            if (partFile.exists()) partFile.delete()
+                        }
                         return@withContext thumbBytes
                     }
                 }
@@ -705,6 +762,79 @@ class VaultRepositoryImpl @Inject constructor(
         return hashBytes.joinToString("") { "%02x".format(it) }
     }
 
+    private fun extractVideoThumbnail(file: File): Bitmap? {
+        if (!file.exists() || file.length() <= 0L) return null
+        var bitmap: Bitmap? = null
+        val retriever = MediaMetadataRetriever()
+        try {
+            FileInputStream(file).use { fis ->
+                retriever.setDataSource(fis.fd)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                try {
+                    bitmap = retriever.getScaledFrameAtTime(
+                        1_000_000L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                        256,
+                        256
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.getFrameAtTime(
+                        1_000_000L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.getFrameAtTime(
+                        0L,
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.getFrameAtTime(
+                        0L,
+                        MediaMetadataRetriever.OPTION_CLOSEST
+                    )
+                } catch (_: Exception) {}
+            }
+            if (bitmap == null) {
+                try {
+                    bitmap = retriever.frameAtTime
+                } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+
+        if (bitmap == null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    bitmap = android.media.ThumbnailUtils.createVideoThumbnail(
+                        file,
+                        android.util.Size(256, 256),
+                        null
+                    )
+                } else {
+                    @Suppress("DEPRECATION")
+                    bitmap = android.media.ThumbnailUtils.createVideoThumbnail(
+                        file.absolutePath,
+                        MediaStore.Images.Thumbnails.MINI_KIND
+                    )
+                }
+            } catch (_: Exception) {}
+        }
+
+        return bitmap
+    }
+
     private suspend fun saveEncryptedThumbnailForUri(sourceUri: Uri, destinationVthumb: File, isVideo: Boolean) {
         try {
             var thumbBitmap: Bitmap? = null
@@ -719,9 +849,33 @@ class VaultRepositoryImpl @Inject constructor(
                 if (isVideo) {
                     val retriever = MediaMetadataRetriever()
                     try {
-                        retriever.setDataSource(context, sourceUri)
-                        thumbBitmap = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                            ?: retriever.frameAtTime
+                        context.contentResolver.openFileDescriptor(sourceUri, "r")?.use { pfd ->
+                            retriever.setDataSource(pfd.fileDescriptor)
+                        } ?: retriever.setDataSource(context, sourceUri)
+
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                            try {
+                                thumbBitmap = retriever.getScaledFrameAtTime(
+                                    1_000_000L,
+                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                    320,
+                                    320
+                                )
+                            } catch (_: Exception) {}
+                        }
+                        if (thumbBitmap == null) {
+                            thumbBitmap = retriever.getFrameAtTime(1_000_000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        }
+                        if (thumbBitmap == null) {
+                            thumbBitmap = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        }
+                        if (thumbBitmap == null) {
+                            thumbBitmap = retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
+                        }
+                        if (thumbBitmap == null) {
+                            thumbBitmap = retriever.frameAtTime
+                        }
+                    } catch (_: Exception) {
                     } finally {
                         try { retriever.release() } catch (_: Exception) {}
                     }
@@ -751,7 +905,19 @@ class VaultRepositoryImpl @Inject constructor(
                 bmp.compress(Bitmap.CompressFormat.JPEG, 80, bos)
                 val bytes = bos.toByteArray()
                 bmp.recycle()
-                cryptoManager.encryptBytesToVaultFile(bytes, destinationVthumb)
+                val partFile = File(destinationVthumb.parentFile, "${destinationVthumb.name}_${System.nanoTime()}.part")
+                try {
+                    cryptoManager.encryptBytesToVaultFile(bytes, partFile)
+                    if (partFile.exists() && partFile.length() > 0L) {
+                        if (destinationVthumb.exists()) destinationVthumb.delete()
+                        if (!partFile.renameTo(destinationVthumb)) {
+                            partFile.copyTo(destinationVthumb, overwrite = true)
+                            partFile.delete()
+                        }
+                    }
+                } finally {
+                    if (partFile.exists()) partFile.delete()
+                }
             }
         } catch (e: Exception) {
             android.util.Log.e("VaultRepo", "Encrypted thumbnail error", e)
@@ -760,16 +926,8 @@ class VaultRepositoryImpl @Inject constructor(
 
     private suspend fun saveEncryptedThumbnailForFile(file: File, destinationVthumb: File, isVideo: Boolean) {
         try {
-            var thumbBitmap: Bitmap? = null
-            if (isVideo) {
-                val retriever = MediaMetadataRetriever()
-                try {
-                    retriever.setDataSource(file.absolutePath)
-                    thumbBitmap = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                        ?: retriever.frameAtTime
-                } finally {
-                    try { retriever.release() } catch (_: Exception) {}
-                }
+            var thumbBitmap: Bitmap? = if (isVideo) {
+                extractVideoThumbnail(file)
             } else {
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 BitmapFactory.decodeFile(file.absolutePath, bounds)
@@ -783,7 +941,7 @@ class VaultRepositoryImpl @Inject constructor(
                     inSampleSize = sampleSize
                     inPreferredConfig = Bitmap.Config.RGB_565
                 }
-                thumbBitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
+                BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
             }
 
             thumbBitmap?.let { bmp ->
@@ -791,7 +949,19 @@ class VaultRepositoryImpl @Inject constructor(
                 bmp.compress(Bitmap.CompressFormat.JPEG, 80, bos)
                 val bytes = bos.toByteArray()
                 bmp.recycle()
-                cryptoManager.encryptBytesToVaultFile(bytes, destinationVthumb)
+                val partFile = File(destinationVthumb.parentFile, "${destinationVthumb.name}_${System.nanoTime()}.part")
+                try {
+                    cryptoManager.encryptBytesToVaultFile(bytes, partFile)
+                    if (partFile.exists() && partFile.length() > 0L) {
+                        if (destinationVthumb.exists()) destinationVthumb.delete()
+                        if (!partFile.renameTo(destinationVthumb)) {
+                            partFile.copyTo(destinationVthumb, overwrite = true)
+                            partFile.delete()
+                        }
+                    }
+                } finally {
+                    if (partFile.exists()) partFile.delete()
+                }
             }
         } catch (e: Exception) {
             android.util.Log.e("VaultRepo", "Encrypted thumbnail file error", e)

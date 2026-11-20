@@ -209,7 +209,18 @@ class VideoEditorViewModel @Inject constructor(
         metadataJob = viewModelScope.launch(Dispatchers.IO) {
             val retriever = MediaMetadataRetriever()
             try {
-                retriever.setDataSource(context, uri)
+                if (uri.scheme == "file" || uri.path?.startsWith("/") == true) {
+                    val file = if (uri.scheme == "file") File(uri.path ?: "") else File(uri.toString())
+                    if (file.exists()) {
+                        java.io.FileInputStream(file).use { fis ->
+                            retriever.setDataSource(fis.fd)
+                        }
+                    } else {
+                        retriever.setDataSource(context, uri)
+                    }
+                } else {
+                    retriever.setDataSource(context, uri)
+                }
                 val durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                     ?.toLongOrNull()
                     ?.coerceAtLeast(0L) ?: 0L
