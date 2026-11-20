@@ -2,6 +2,7 @@ package com.gallery.core.ui.components
 
 import android.content.pm.PackageManager
 import android.os.Build
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -121,6 +122,8 @@ fun AppUpdateDialog(
         },
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(24.dp),
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp,
         icon = {
             val icon: ImageVector = when (updateState) {
                 is AppUpdateState.UpdateAvailable -> Icons.Outlined.RocketLaunch
@@ -343,7 +346,8 @@ private fun UpdateAvailableContent(
                     .fillMaxWidth()
                     .heightIn(max = 160.dp),
                 shape = RoundedCornerShape(12.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
             ) {
                 Column(
                     modifier = Modifier

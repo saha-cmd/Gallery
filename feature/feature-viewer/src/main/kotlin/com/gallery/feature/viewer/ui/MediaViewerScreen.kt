@@ -80,8 +80,10 @@ import androidx.media3.ui.PlayerView
 import coil.compose.AsyncImage
 import coil.request.CachePolicy
 import coil.request.ImageRequest
+import com.gallery.core.data.permissions.MediaPermissionManager
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.ui.components.AddToAlbumDialog
+import com.gallery.core.ui.components.DirectVaultTransferPermissionDialog
 import com.gallery.core.ui.components.MediaInfoBottomSheet
 import com.gallery.core.ui.components.MoveToAlbumDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
@@ -178,17 +180,52 @@ fun MediaViewerScreen(
         contract = ActivityResultContracts.StartIntentSenderForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            if (uiState.itemMovedToVault) {
-                onBack()
+            viewModel.onVaultDeleteConfirmed()
+        } else {
+            viewModel.onVaultDeleteCancelled()
+        }
+    }
+
+    val activeVaultDeleteSender = uiState.pendingVaultDeleteIntentSender ?: uiState.pendingDeleteIntentSender
+    LaunchedEffect(activeVaultDeleteSender, uiState.showDirectTransferPermissionDialog) {
+        if (!uiState.showDirectTransferPermissionDialog) {
+            activeVaultDeleteSender?.let { sender ->
+                systemDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                viewModel.clearPendingDeleteIntent()
             }
         }
     }
 
-    LaunchedEffect(uiState.pendingDeleteIntentSender) {
-        uiState.pendingDeleteIntentSender?.let { sender ->
-            systemDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
-            viewModel.clearPendingDeleteIntent()
+    val manageFilesAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (MediaPermissionManager.canModifyMediaSilently(context)) {
+            viewModel.dismissDirectTransferPermissionDialog()
+            viewModel.onVaultDeleteConfirmed()
         }
+    }
+
+    if (uiState.showDirectTransferPermissionDialog) {
+        DirectVaultTransferPermissionDialog(
+            onDismissRequest = {
+                viewModel.dismissDirectTransferPermissionDialog()
+                viewModel.onVaultDeleteCancelled()
+            },
+            onAllowDirectTransfer = {
+                viewModel.dismissDirectTransferPermissionDialog()
+                manageFilesAccessLauncher.launch(
+                    MediaPermissionManager.createManageAllFilesAccessIntent(context)
+                )
+            },
+            onContinueWithSystemPopup = {
+                viewModel.dismissDirectTransferPermissionDialog()
+                val sender = uiState.pendingVaultDeleteIntentSender ?: uiState.pendingDeleteIntentSender
+                sender?.let {
+                    systemDeleteLauncher.launch(IntentSenderRequest.Builder(it).build())
+                    viewModel.clearPendingDeleteIntent()
+                }
+            }
+        )
     }
 
     // Scoped Storage move permission launcher
@@ -215,9 +252,9 @@ fun MediaViewerScreen(
         }
     }
 
-    // If item was moved to vault directly without needing consent, return to gallery
+    // If item was moved to vault, return to gallery
     LaunchedEffect(uiState.itemMovedToVault) {
-        if (uiState.itemMovedToVault && uiState.pendingDeleteIntentSender == null) {
+        if (uiState.itemMovedToVault) {
             onBack()
         }
     }
@@ -445,6 +482,8 @@ fun MediaViewerScreen(
     itemToDelete?.let { item ->
         AlertDialog(
             onDismissRequest = { itemToDelete = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Move to Recycle Bin?") },
             text = { Text("\"${item.name}\" will be moved to the Recycle Bin. You can restore it back to the main gallery anytime.") },
@@ -1340,7 +1379,8 @@ private fun ViewerControlsOverlay(
                         DropdownMenu(
                             expanded = isMoreMenuExpanded,
                             onDismissRequest = { onMoreMenuExpandedChange(false) },
-                            containerColor = Color(0xFF2C2C2E)
+                            containerColor = Color(0xFF2C2C2E),
+                            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.16f))
                         ) {
                             DropdownMenuItem(
                                 text = { Text("Add to Album", color = Color.White) },

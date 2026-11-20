@@ -1,5 +1,6 @@
 package com.gallery.core.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -53,6 +54,8 @@ fun MoveToGroupDialog(
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp,
         icon = {
             Icon(
                 imageVector = Icons.Outlined.DriveFileMove,
@@ -120,8 +123,13 @@ fun MoveToGroupDialog(
                                     containerColor = if (isCurrent) {
                                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
                                     } else {
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                        MaterialTheme.colorScheme.surfaceContainerHighest
                                     }
+                                ),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isCurrent) MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)
+                                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                                 ),
                                 shape = RoundedCornerShape(8.dp)
                             ) {

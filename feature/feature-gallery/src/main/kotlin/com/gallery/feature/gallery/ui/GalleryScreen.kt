@@ -42,11 +42,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.gallery.core.data.permissions.MediaPermissionManager
+import com.gallery.core.ui.components.DirectVaultTransferPermissionDialog
 import coil.imageLoader
 import coil.memory.MemoryCache
 import kotlinx.coroutines.launch
@@ -60,6 +63,7 @@ import com.gallery.core.ui.components.ChangeAlbumCoverDialog
 import com.gallery.core.ui.components.CreateAlbumDialog
 import com.gallery.core.ui.components.EditGroupAlbumsDialog
 import com.gallery.core.ui.components.EmptyStateView
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.ui.components.GroupAlbumsDialog
 import com.gallery.core.ui.components.MediaThumbnail
 import com.gallery.core.ui.components.MoveAlbumToGroupDialog
@@ -163,6 +167,12 @@ fun GalleryScreen(
             pendingMoveIntentSender = uiState.pendingMoveIntentSender,
             onRetryMoveAfterPermission = viewModel::retryPendingMove,
             onClearPendingMoveIntent = viewModel::clearPendingMove,
+            pendingDeleteIntentSender = uiState.pendingVaultDeleteIntentSender ?: uiState.pendingDeleteIntentSender,
+            onConfirmDeleteIntent = viewModel::onVaultDeleteConfirmed,
+            onCancelDeleteIntent = viewModel::onVaultDeleteCancelled,
+            onClearPendingDeleteIntent = viewModel::clearPendingVaultDeleteIntent,
+            showDirectTransferPermissionDialog = uiState.showDirectTransferPermissionDialog,
+            onDismissDirectTransferDialog = viewModel::dismissDirectTransferPermissionDialog,
             onToggleFavoritesForSelected = { viewModel.toggleFavoritesForSelected() },
             onAddSelectedToCustomAlbum = { targetAlbumId, _ -> viewModel.addSelectedToCustomAlbum(targetAlbumId) },
             onCreateAndAddSelectedToCustomAlbum = { name, _ -> viewModel.createAndAddSelectedToCustomAlbum(name) },
@@ -170,6 +180,8 @@ fun GalleryScreen(
             onRenameAlbum = { albumId, newName -> viewModel.renameCustomAlbum(albumId, newName) },
             onDeleteAlbum = { albumId -> viewModel.deleteCustomAlbum(albumId) },
             onAddItemsToAlbum = { albumId, items -> viewModel.addItemsToCustomAlbum(albumId, items) },
+            getSavedScrollPosition = viewModel::getGridScrollPosition,
+            onSaveScrollPosition = viewModel::saveGridScrollPosition,
             columnCount = gridColumns,
             onColumnCountChanged = viewModel::setGridColumns
         )
@@ -189,16 +201,57 @@ fun GalleryScreen(
     // System delete confirmation launcher for Android 11+ Scoped Storage
     val systemDeleteLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartIntentSenderForResult()
-    ) { _ ->
-        // When user grants system deletion, MediaStore automatically updates via ContentObserver
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.onVaultDeleteConfirmed()
+        } else {
+            viewModel.onVaultDeleteCancelled()
+        }
     }
 
-    LaunchedEffect(uiState.pendingDeleteIntentSender) {
-        uiState.pendingDeleteIntentSender?.let { sender ->
-            systemDeleteLauncher.launch(
-                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
-            )
-            viewModel.clearPendingDeleteIntent()
+    val manageFilesAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (MediaPermissionManager.canModifyMediaSilently(context)) {
+            viewModel.dismissDirectTransferPermissionDialog()
+            viewModel.onVaultDeleteConfirmed()
+        }
+    }
+
+    if (uiState.showDirectTransferPermissionDialog) {
+        DirectVaultTransferPermissionDialog(
+            onDismissRequest = {
+                viewModel.dismissDirectTransferPermissionDialog()
+                viewModel.onVaultDeleteCancelled()
+            },
+            onAllowDirectTransfer = {
+                viewModel.dismissDirectTransferPermissionDialog()
+                manageFilesAccessLauncher.launch(
+                    MediaPermissionManager.createManageAllFilesAccessIntent(context)
+                )
+            },
+            onContinueWithSystemPopup = {
+                viewModel.dismissDirectTransferPermissionDialog()
+                val sender = uiState.pendingVaultDeleteIntentSender ?: uiState.pendingDeleteIntentSender
+                sender?.let {
+                    systemDeleteLauncher.launch(
+                        androidx.activity.result.IntentSenderRequest.Builder(it).build()
+                    )
+                    viewModel.clearPendingVaultDeleteIntent()
+                }
+            }
+        )
+    }
+
+    val activeVaultDeleteSender = uiState.pendingVaultDeleteIntentSender ?: uiState.pendingDeleteIntentSender
+    LaunchedEffect(activeVaultDeleteSender, uiState.showDirectTransferPermissionDialog) {
+        if (!uiState.showDirectTransferPermissionDialog) {
+            activeVaultDeleteSender?.let { sender ->
+                systemDeleteLauncher.launch(
+                    androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+                )
+                viewModel.clearPendingVaultDeleteIntent()
+            }
         }
     }
 
@@ -377,6 +430,8 @@ fun GalleryScreen(
                                     monthlyMediaGroups = uiState.monthlyMediaGroups,
                                     columns = gridColumns,
                                     onColumnsChanged = viewModel::setGridColumns,
+                                    savedScroll = remember { viewModel.getGridScrollPosition("timeline") },
+                                    onSaveScrollPosition = { idx, off -> viewModel.saveGridScrollPosition("timeline", idx, off) },
                                     isSelectionMode = uiState.isSelectionMode,
                                     selectedIds = uiState.selectedItemIds,
                                     isParentScrolling = { pagerState.isScrollInProgress },
@@ -402,6 +457,8 @@ fun GalleryScreen(
                                     albumGroups = uiState.albumGroups,
                                     isGroupedView = isGroupedView,
                                     collapsedGroups = collapsedGroups,
+                                    savedScroll = remember { viewModel.getGridScrollPosition("albums") },
+                                    onSaveScrollPosition = { idx, off -> viewModel.saveGridScrollPosition("albums", idx, off) },
                                     isAlbumSelectionMode = uiState.isAlbumSelectionMode,
                                     selectedAlbumIds = uiState.selectedAlbumIds,
                                     isParentScrolling = { pagerState.isScrollInProgress },
@@ -428,6 +485,8 @@ fun GalleryScreen(
                                     videos = uiState.videos,
                                     columns = gridColumns,
                                     onColumnsChanged = viewModel::setGridColumns,
+                                    savedScroll = remember { viewModel.getGridScrollPosition("videos") },
+                                    onSaveScrollPosition = { idx, off -> viewModel.saveGridScrollPosition("videos", idx, off) },
                                     isSelectionMode = uiState.isSelectionMode,
                                     selectedIds = uiState.selectedItemIds,
                                     isParentScrolling = { pagerState.isScrollInProgress },
@@ -587,6 +646,8 @@ fun GalleryScreen(
         val anyCustom = uiState.selectedAlbums.any { it.isCustom }
         AlertDialog(
             onDismissRequest = { showDeleteAlbumsConfirmation = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = {
                 Icon(
                     imageVector = Icons.Outlined.Delete,
@@ -734,6 +795,8 @@ fun GalleryScreen(
         var renameText by remember(group) { mutableStateOf(group.name) }
         AlertDialog(
             onDismissRequest = { groupToRename = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.DriveFileRenameOutline, null, tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Rename Group") },
             text = {
@@ -771,6 +834,8 @@ fun GalleryScreen(
     groupToDissolve?.let { group ->
         AlertDialog(
             onDismissRequest = { groupToDissolve = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.FolderDelete, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Ungroup All?") },
             text = { Text("Albums in \"${group.name}\" will be returned to the ungrouped list. Photos and videos in these albums will NOT be deleted.") },
@@ -810,6 +875,8 @@ fun GalleryScreen(
     if (showDeleteConfirmation) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirmation = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Move ${uiState.selectedItemIds.size} item(s) to Recycle Bin?") },
             text = { Text("These items will be moved to the Recycle Bin. You can access and restore them back to the main gallery anytime.") },
@@ -875,7 +942,12 @@ private fun GalleryTopBar(
                 IconButton(onClick = { showMenu = true }) {
                     Icon(Icons.Outlined.MoreVert, contentDescription = "More options")
                 }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                ) {
                     if (selectedTab == GalleryTab.ALBUMS) {
                         DropdownMenuItem(
                             text = { Text("Group Albums") },
@@ -932,44 +1004,89 @@ private fun SelectionTopBar(
     onAddToAlbum: () -> Unit,
     onMoveToAlbum: () -> Unit
 ) {
+    var showMoreMenu by remember { mutableStateOf(false) }
+
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onClearSelection) {
-                Icon(Icons.Filled.Close, contentDescription = "Exit selection")
+                Icon(Icons.Filled.Close, contentDescription = "Clear selection")
             }
         },
         title = {
             Text(
                 text = "$selectedCount selected",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
             )
         },
         actions = {
             IconButton(onClick = onSelectAll) {
-                Icon(Icons.Outlined.SelectAll, contentDescription = "Select / Deselect All")
-            }
-            IconButton(onClick = onToggleFavorite) {
-                Icon(
-                    imageVector = Icons.Outlined.Favorite,
-                    contentDescription = "Favorite",
-                    tint = Color(0xFFFF3366)
-                )
-            }
-            IconButton(onClick = onAddToAlbum) {
-                Icon(Icons.Outlined.DriveFolderUpload, contentDescription = "Add to Album")
-            }
-            IconButton(onClick = onMoveToAlbum) {
-                Icon(Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = "Move to Album")
+                Icon(Icons.Outlined.SelectAll, contentDescription = "Select all")
             }
             IconButton(onClick = onShare) {
                 Icon(Icons.Outlined.Share, contentDescription = "Share")
             }
-            IconButton(onClick = onMoveToVault) {
-                Icon(Icons.Outlined.Lock, contentDescription = "Move to Secure Folder")
-            }
             IconButton(onClick = onDelete) {
-                Icon(Icons.Outlined.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                Icon(
+                    imageVector = Icons.Outlined.Delete,
+                    contentDescription = "Delete",
+                    tint = MaterialTheme.colorScheme.error
+                )
+            }
+            Box {
+                IconButton(onClick = { showMoreMenu = true }) {
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "More options")
+                }
+                DropdownMenu(
+                    expanded = showMoreMenu,
+                    onDismissRequest = { showMoreMenu = false },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Add to Favorites") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.FavoriteBorder, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onToggleFavorite()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Add to Album") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.CreateNewFolder, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onAddToAlbum()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move to Album") },
+                        leadingIcon = {
+                            Icon(Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onMoveToAlbum()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Move to Secure Folder") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.Lock, contentDescription = null)
+                        },
+                        onClick = {
+                            showMoreMenu = false
+                            onMoveToVault()
+                        }
+                    )
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
@@ -999,45 +1116,46 @@ private fun AlbumSelectionTopBar(
     TopAppBar(
         navigationIcon = {
             IconButton(onClick = onClearSelection) {
-                Icon(Icons.Filled.Close, contentDescription = "Exit album selection")
+                Icon(Icons.Filled.Close, contentDescription = "Clear selection")
             }
         },
         title = {
             Text(
                 text = "$selectedCount selected",
                 style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
             )
         },
         actions = {
             // 1. Select All Albums
             IconButton(onClick = onSelectAll) {
-                Icon(Icons.Outlined.SelectAll, contentDescription = "Select / Deselect All")
+                Icon(Icons.Outlined.SelectAll, contentDescription = "Select all")
             }
             // 2. Share Album
             IconButton(onClick = onShare) {
-                Icon(Icons.Outlined.Share, contentDescription = "Share Album")
+                Icon(Icons.Outlined.Share, contentDescription = "Share")
             }
-            // 3. Move to Vault
-            IconButton(onClick = onMoveToVault) {
-                Icon(Icons.Outlined.Lock, contentDescription = "Move to Secure Vault")
-            }
-            // 4. Delete Album (tinted error)
+            // 3. Delete Album (tinted error)
             IconButton(onClick = onDelete) {
                 Icon(
                     Icons.Outlined.Delete,
-                    contentDescription = "Delete Album",
+                    contentDescription = "Delete",
                     tint = MaterialTheme.colorScheme.error
                 )
             }
-            // 5. Overflow Actions (⋮ DropdownMenu)
+            // 4. Overflow Actions (⋮ DropdownMenu)
             Box {
                 IconButton(onClick = { showOverflowMenu = true }) {
-                    Icon(Icons.Outlined.MoreVert, contentDescription = "More actions")
+                    Icon(Icons.Outlined.MoreVert, contentDescription = "More options")
                 }
                 DropdownMenu(
                     expanded = showOverflowMenu,
-                    onDismissRequest = { showOverflowMenu = false }
+                    onDismissRequest = { showOverflowMenu = false },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
                 ) {
                     // Move to Group (always shown)
                     DropdownMenuItem(
@@ -1048,6 +1166,18 @@ private fun AlbumSelectionTopBar(
                         onClick = {
                             showOverflowMenu = false
                             onMoveToGroup()
+                        }
+                    )
+
+                    // Move to Secure Folder (always shown)
+                    DropdownMenuItem(
+                        text = { Text("Move to Secure Folder") },
+                        leadingIcon = {
+                            Icon(Icons.Outlined.Lock, contentDescription = null)
+                        },
+                        onClick = {
+                            showOverflowMenu = false
+                            onMoveToVault()
                         }
                     )
 
@@ -1065,8 +1195,8 @@ private fun AlbumSelectionTopBar(
                         )
                     }
 
-                    // Change Cover Image (shown when selectedCount == 1 and album has at least 1 item)
-                    if (singleAlbum != null && singleAlbum.items.isNotEmpty()) {
+                    // Change Cover Image (shown when selectedCount == 1, not a smart album, and has at least 1 item)
+                    if (singleAlbum != null && !singleAlbum.isSmartAlbum && singleAlbum.items.isNotEmpty()) {
                         DropdownMenuItem(
                             text = { Text("Change Cover Image") },
                             leadingIcon = {
@@ -1198,6 +1328,8 @@ private fun TimelineGrid(
     monthlyMediaGroups: List<MediaGroup>,
     columns: Int,
     onColumnsChanged: (Int) -> Unit,
+    savedScroll: GridScrollPosition = GridScrollPosition(),
+    onSaveScrollPosition: (Int, Int) -> Unit = { _, _ -> },
     isSelectionMode: Boolean,
     selectedIds: Set<Long>,
     onItemClick: (MediaItem) -> Unit,
@@ -1215,11 +1347,27 @@ private fun TimelineGrid(
         return
     }
 
+    val gridState = rememberViewportOnlyLazyGridState(
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset
+    )
+
+    // Safety net: restore scroll if mediaGroups populate after initial frame
+    LaunchedEffect(mediaGroups.isNotEmpty()) {
+        if (mediaGroups.isNotEmpty() && savedScroll.index > 0 && gridState.firstVisibleItemIndex == 0) {
+            gridState.scrollToItem(savedScroll.index, savedScroll.offset)
+        }
+    }
+
     AnimatedPinchGridContainer(
         currentColumns = columns,
         onColumnsChanged = onColumnsChanged,
         minColumns = 2,
         maxColumns = 7,
+        gridState = gridState,
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset,
+        onScrollPositionChanged = onSaveScrollPosition,
         onResolveTargetAnchorIndex = { sourceCols, targetCols, sourceFlatIndex ->
             val srcGroups = if (sourceCols >= 5) monthlyMediaGroups else mediaGroups
             val dstGroups = if (targetCols >= 5) monthlyMediaGroups else mediaGroups
@@ -1283,7 +1431,10 @@ private fun TimelineGrid(
                 ) { mediaItem ->
                     MediaThumbnail(
                         item = mediaItem,
-                        onClick = { onItemClick(mediaItem) },
+                        onClick = {
+                            onSaveScrollPosition(layerGridState.firstVisibleItemIndex, layerGridState.firstVisibleItemScrollOffset)
+                            onItemClick(mediaItem)
+                        },
                         onLongClick = { onItemLongClick(mediaItem) },
                         isSelectionMode = isSelectionMode,
                         isSelected = mediaItem.id in selectedIds,
@@ -1373,6 +1524,8 @@ private fun AlbumsGrid(
     albumGroups: List<AlbumGroupSection>,
     isGroupedView: Boolean,
     collapsedGroups: Set<String>,
+    savedScroll: GridScrollPosition = GridScrollPosition(),
+    onSaveScrollPosition: (Int, Int) -> Unit = { _, _ -> },
     isAlbumSelectionMode: Boolean = false,
     selectedAlbumIds: Set<Long> = emptySet(),
     onToggleGroupCollapsed: (String) -> Unit,
@@ -1394,7 +1547,32 @@ private fun AlbumsGrid(
         return
     }
 
-    val gridState = rememberViewportOnlyLazyGridState()
+    val gridState = rememberViewportOnlyLazyGridState(
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset
+    )
+
+    // Safety net: restore scroll if albums load after initial frame
+    LaunchedEffect(albums.isNotEmpty()) {
+        if (albums.isNotEmpty() && savedScroll.index > 0 && gridState.firstVisibleItemIndex == 0) {
+            gridState.scrollToItem(savedScroll.index, savedScroll.offset)
+        }
+    }
+
+    LaunchedEffect(gridState) {
+        snapshotFlow {
+            Triple(
+                gridState.firstVisibleItemIndex,
+                gridState.firstVisibleItemScrollOffset,
+                gridState.isScrollInProgress
+            )
+        }.collect { (idx, off, isScrolling) ->
+            if (isScrolling || idx > 0 || off > 0) {
+                onSaveScrollPosition(idx, off)
+            }
+        }
+    }
+
     val isScrolling by remember { derivedStateOf { gridState.isScrollInProgress || isParentScrolling() } }
 
     Box(modifier = modifier.fillMaxSize()) {
@@ -1455,7 +1633,10 @@ private fun AlbumsGrid(
                         items(section.albums, key = { "group_${section.title}_album_${it.id}" }) { album ->
                             AlbumCard(
                                 album = album,
-                                onClick = { onAlbumClick(album) },
+                                onClick = {
+                                    onSaveScrollPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+                                    onAlbumClick(album)
+                                },
                                 onLongClick = { onAlbumLongClick(album) },
                                 isScrolling = isScrolling,
                                 isSelectionMode = isAlbumSelectionMode,
@@ -1469,7 +1650,10 @@ private fun AlbumsGrid(
                 items(albums, key = { "flat_album_${it.id}" }) { album ->
                     AlbumCard(
                         album = album,
-                        onClick = { onAlbumClick(album) },
+                        onClick = {
+                            onSaveScrollPosition(gridState.firstVisibleItemIndex, gridState.firstVisibleItemScrollOffset)
+                            onAlbumClick(album)
+                        },
                         onLongClick = { onAlbumLongClick(album) },
                         isScrolling = isScrolling,
                         isSelectionMode = isAlbumSelectionMode,
@@ -1546,7 +1730,9 @@ private fun UserAlbumGroupHeader(
                 }
                 DropdownMenu(
                     expanded = showMenu,
-                    onDismissRequest = { showMenu = false }
+                    onDismissRequest = { showMenu = false },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
                 ) {
                     DropdownMenuItem(
                         text = { Text("Add / Remove Albums") },
@@ -1823,6 +2009,8 @@ private fun VideosGrid(
     onVideoLongClick: (MediaItem.Video) -> Unit,
     columns: Int = 3,
     onColumnsChanged: (Int) -> Unit = {},
+    savedScroll: GridScrollPosition = GridScrollPosition(),
+    onSaveScrollPosition: (Int, Int) -> Unit = { _, _ -> },
     isParentScrolling: () -> Boolean = { false },
     modifier: Modifier = Modifier
 ) {
@@ -1836,11 +2024,27 @@ private fun VideosGrid(
         return
     }
 
+    val gridState = rememberViewportOnlyLazyGridState(
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset
+    )
+
+    // Safety net: restore scroll if videos load after initial frame
+    LaunchedEffect(videos.isNotEmpty()) {
+        if (videos.isNotEmpty() && savedScroll.index > 0 && gridState.firstVisibleItemIndex == 0) {
+            gridState.scrollToItem(savedScroll.index, savedScroll.offset)
+        }
+    }
+
     AnimatedPinchGridContainer(
         currentColumns = columns,
         onColumnsChanged = onColumnsChanged,
         minColumns = 2,
         maxColumns = 7,
+        gridState = gridState,
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset,
+        onScrollPositionChanged = onSaveScrollPosition,
         modifier = modifier.fillMaxSize(),
         overlayContent = { activeGridState, _ ->
             VerticalFastScrollbar(
@@ -1869,7 +2073,10 @@ private fun VideosGrid(
             ) { video ->
                 MediaThumbnail(
                     item = video,
-                    onClick = { onVideoClick(video) },
+                    onClick = {
+                        onSaveScrollPosition(layerGridState.firstVisibleItemIndex, layerGridState.firstVisibleItemScrollOffset)
+                        onVideoClick(video)
+                    },
                     onLongClick = { onVideoLongClick(video) },
                     isSelectionMode = isSelectionMode,
                     isSelected = video.id in selectedIds,

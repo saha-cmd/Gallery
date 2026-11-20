@@ -70,10 +70,72 @@ class VaultCryptoManager @Inject constructor(
         encryptStreamToVault(inputStream, originalName)
     }
 
+    /**
+     * Encrypts a raw byte array directly to a destination file using Envelope Encryption.
+     * Returns the content IV.
+     */
+    suspend fun encryptBytesToVaultFile(
+        bytes: ByteArray,
+        destinationFile: File
+    ): ByteArray = withContext(Dispatchers.IO) {
+        destinationFile.parentFile?.mkdirs()
+        ByteArrayInputStream(bytes).use { input ->
+            encryptStreamToDestination(input, destinationFile)
+        }
+    }
+
+    /**
+     * Decrypts an encrypted vault file directly into an in-memory ByteArray without disk temp files.
+     */
+    suspend fun decryptBytesFromVaultFile(
+        encryptedFile: File,
+        iv: ByteArray = ByteArray(0)
+    ): ByteArray = withContext(Dispatchers.IO) {
+        val out = ByteArrayOutputStream()
+        decryptToOutputStream(encryptedFile, iv, out)
+        out.toByteArray()
+    }
+
+    /**
+     * Ensures .nomedia markers exist in vault and secure temp directories.
+     */
+    fun ensureNomediaMarkers() {
+        try {
+            val vaultDir = File(context.filesDir, "vault").apply { mkdirs() }
+            val nomedia1 = File(vaultDir, ".nomedia")
+            if (!nomedia1.exists()) nomedia1.createNewFile()
+
+            val thumbDir = File(vaultDir, "thumbnails").apply { mkdirs() }
+            val nomedia2 = File(thumbDir, ".nomedia")
+            if (!nomedia2.exists()) nomedia2.createNewFile()
+
+            val tempDir = File(context.cacheDir, "vault_secure_temp").apply { mkdirs() }
+            val nomedia3 = File(tempDir, ".nomedia")
+            if (!nomedia3.exists()) nomedia3.createNewFile()
+        } catch (_: Exception) {}
+    }
+
     private fun encryptStreamToVault(
         inputStream: InputStream,
         originalName: String
     ): VaultEncryptionResult {
+        val encryptedFileName = "${UUID.randomUUID()}.vault"
+        val vaultDir = File(context.filesDir, "vault").apply { mkdirs() }
+        val encryptedFile = File(vaultDir, encryptedFileName)
+        val contentIv = encryptStreamToDestination(inputStream, encryptedFile)
+
+        return VaultEncryptionResult(
+            encryptedFilePath = encryptedFile.absolutePath,
+            originalName = originalName,
+            iv = contentIv,
+            originalSize = encryptedFile.length()
+        )
+    }
+
+    private fun encryptStreamToDestination(
+        inputStream: InputStream,
+        destinationFile: File
+    ): ByteArray {
         // 1. Generate unique 256-bit data key
         val dataKeyBytes = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
@@ -92,13 +154,8 @@ class VaultCryptoManager @Inject constructor(
             IvParameterSpec(contentIv)
         )
 
-        val encryptedFileName = "${UUID.randomUUID()}.vault"
-        val vaultDir = File(context.filesDir, "vault").apply { mkdirs() }
-        val encryptedFile = File(vaultDir, encryptedFileName)
-
-        var totalOriginalSize = 0L
-
-        encryptedFile.outputStream().use { fileOut ->
+        destinationFile.parentFile?.mkdirs()
+        destinationFile.outputStream().use { fileOut ->
             // Header: Magic (4 bytes) + Version (1 byte)
             fileOut.write(MAGIC_HEADER)
             fileOut.write(FORMAT_VERSION.toInt())
@@ -123,19 +180,13 @@ class VaultCryptoManager @Inject constructor(
                     var bytesRead: Int
                     while (input.read(buffer).also { bytesRead = it } != -1) {
                         cos.write(buffer, 0, bytesRead)
-                        totalOriginalSize += bytesRead
                     }
                 }
                 cos.flush()
             }
         }
 
-        return VaultEncryptionResult(
-            encryptedFilePath = encryptedFile.absolutePath,
-            originalName = originalName,
-            iv = contentIv,
-            originalSize = totalOriginalSize
-        )
+        return contentIv
     }
 
     /**
@@ -145,13 +196,9 @@ class VaultCryptoManager @Inject constructor(
         encryptedFilePath: String,
         iv: ByteArray
     ): ByteArray = withContext(Dispatchers.IO) {
-        val tempFile = File.createTempFile("vault_mem_decrypt", ".tmp", context.cacheDir)
-        try {
-            decryptToFile(encryptedFilePath, iv, tempFile)
-            tempFile.readBytes()
-        } finally {
-            tempFile.delete()
-        }
+        val out = ByteArrayOutputStream()
+        decryptToOutputStream(File(encryptedFilePath), iv, out)
+        out.toByteArray()
     }
 
     /**
@@ -162,15 +209,7 @@ class VaultCryptoManager @Inject constructor(
         iv: ByteArray,
         destinationStream: OutputStream
     ) = withContext(Dispatchers.IO) {
-        val tempFile = File.createTempFile("vault_stream_decrypt", ".tmp", context.cacheDir)
-        try {
-            decryptToFile(encryptedFilePath, iv, tempFile)
-            tempFile.inputStream().use { input ->
-                input.copyTo(destinationStream)
-            }
-        } finally {
-            tempFile.delete()
-        }
+        decryptToOutputStream(File(encryptedFilePath), iv, destinationStream)
     }
 
     /**
@@ -182,9 +221,19 @@ class VaultCryptoManager @Inject constructor(
         iv: ByteArray,
         destinationFile: File
     ) = withContext(Dispatchers.IO) {
-        val file = File(encryptedFilePath)
+        destinationFile.parentFile?.mkdirs()
+        destinationFile.outputStream().use { out ->
+            decryptToOutputStream(File(encryptedFilePath), iv, out)
+        }
+    }
+
+    suspend fun decryptToOutputStream(
+        file: File,
+        iv: ByteArray,
+        destinationStream: OutputStream
+    ) = withContext(Dispatchers.IO) {
         if (!file.exists()) {
-            throw IOException("Encrypted vault file not found: $encryptedFilePath")
+            throw IOException("Encrypted vault file not found: ${file.absolutePath}")
         }
         val fileSize = file.length()
         if (fileSize < 5) {
@@ -199,7 +248,6 @@ class VaultCryptoManager @Inject constructor(
         }
 
         if (isV2) {
-            destinationFile.parentFile?.mkdirs()
             file.inputStream().use { fileIn ->
                 // Skip magic (4 bytes)
                 val magic = ByteArray(4)
@@ -237,22 +285,34 @@ class VaultCryptoManager @Inject constructor(
                     IvParameterSpec(contentIv)
                 )
 
-                destinationFile.outputStream().use { fileOut ->
-                    val cis = CipherInputStream(fileIn, contentCipher)
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var bytesRead: Int
-                    while (cis.read(buffer).also { bytesRead = it } != -1) {
-                        fileOut.write(buffer, 0, bytesRead)
-                    }
-                    fileOut.flush()
-                    try { cis.close() } catch (_: Exception) {}
+                val cis = CipherInputStream(fileIn, contentCipher)
+                val buffer = ByteArray(BUFFER_SIZE)
+                var bytesRead: Int
+                while (cis.read(buffer).also { bytesRead = it } != -1) {
+                    destinationStream.write(buffer, 0, bytesRead)
                 }
+                destinationStream.flush()
+                try { cis.close() } catch (_: Exception) {}
             }
             return@withContext
         }
 
         // Fallback for legacy v1 files
-        decryptLegacyV1File(file, iv, destinationFile)
+        decryptLegacyV1Stream(file, iv, destinationStream)
+    }
+
+    private fun decryptLegacyV1Stream(
+        file: File,
+        iv: ByteArray,
+        destinationStream: OutputStream
+    ) {
+        val tempFile = File.createTempFile("legacy_v1", ".tmp", context.cacheDir)
+        try {
+            decryptLegacyV1File(file, iv, tempFile)
+            tempFile.inputStream().use { it.copyTo(destinationStream) }
+        } finally {
+            if (tempFile.exists()) tempFile.delete()
+        }
     }
 
     private fun readFully(input: InputStream, buffer: ByteArray) {

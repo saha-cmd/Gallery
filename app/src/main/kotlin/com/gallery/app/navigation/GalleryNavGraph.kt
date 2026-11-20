@@ -29,9 +29,9 @@ sealed class Screen(val route: String) {
     object Vault : Screen("vault")
     object Settings : Screen("settings")
     object RecycleBin : Screen("recycle_bin")
-    object Editor : Screen("editor/{mediaUri}?isVideo={isVideo}") {
-        fun createRoute(uri: String, isVideo: Boolean = false) =
-            "editor/${java.net.URLEncoder.encode(uri, "UTF-8")}?isVideo=$isVideo"
+    object Editor : Screen("editor/{mediaUri}?isVideo={isVideo}&isVault={isVault}") {
+        fun createRoute(uri: String, isVideo: Boolean = false, isVault: Boolean = false) =
+            "editor/${java.net.URLEncoder.encode(uri, "UTF-8")}?isVideo=$isVideo&isVault=$isVault"
     }
 }
 
@@ -168,7 +168,7 @@ fun GalleryNavGraph(navController: NavHostController) {
             VaultScreen(
                 onBack = { navController.popBackStack() },
                 onEditItem = { uri ->
-                    navController.navigate(Screen.Editor.createRoute(uri))
+                    navController.navigate(Screen.Editor.createRoute(uri, isVideo = false, isVault = true))
                 }
             )
         }
@@ -246,6 +246,10 @@ fun GalleryNavGraph(navController: NavHostController) {
                 navArgument("isVideo") {
                     type = NavType.BoolType
                     defaultValue = false
+                },
+                navArgument("isVault") {
+                    type = NavType.BoolType
+                    defaultValue = false
                 }
             ),
             enterTransition = {
@@ -270,9 +274,11 @@ fun GalleryNavGraph(navController: NavHostController) {
             val encodedUri = backStackEntry.arguments?.getString("mediaUri") ?: ""
             val uri = java.net.URLDecoder.decode(encodedUri, "UTF-8")
             val isVideo = backStackEntry.arguments?.getBoolean("isVideo") ?: false
+            val isVault = backStackEntry.arguments?.getBoolean("isVault") ?: false
             EditorScreen(
                 mediaUriString = uri,
                 isVideo = isVideo,
+                isVault = isVault,
                 onBack = { navController.popBackStack() }
             )
         }

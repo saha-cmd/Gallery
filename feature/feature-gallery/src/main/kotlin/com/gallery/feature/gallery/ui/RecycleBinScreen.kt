@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -26,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -41,8 +43,10 @@ import android.graphics.Bitmap
 import com.gallery.core.domain.model.RecycleBinItem
 import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.EmptyStateView
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.ui.components.VerticalFastScrollbar
 import com.gallery.core.ui.components.gridThumbnailTargetSize
+import com.gallery.core.ui.components.rememberViewportOnlyLazyGridState
 import com.gallery.feature.gallery.viewmodel.RecycleBinViewModel
 import java.io.File
 
@@ -54,6 +58,18 @@ fun RecycleBinScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val gridColumns by viewModel.gridColumns.collectAsStateWithLifecycle()
+    val savedScroll = remember { viewModel.getGridScrollPosition("recycle_bin") }
+    val gridState = rememberViewportOnlyLazyGridState(
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset
+    )
+
+    LaunchedEffect(uiState.items.isNotEmpty()) {
+        if (uiState.items.isNotEmpty() && savedScroll.index > 0 && gridState.firstVisibleItemIndex == 0) {
+            gridState.scrollToItem(savedScroll.index, savedScroll.offset)
+        }
+    }
+
     var showEmptyBinDialog by remember { mutableStateOf(false) }
     var itemToDeletePermanently by remember { mutableStateOf<RecycleBinItem?>(null) }
     var itemForActionSheet by remember { mutableStateOf<RecycleBinItem?>(null) }
@@ -90,14 +106,17 @@ fun RecycleBinScreen(
                 TopAppBar(
                     navigationIcon = {
                         IconButton(onClick = viewModel::clearSelection) {
-                            Icon(Icons.Filled.Close, "Exit selection")
+                            Icon(Icons.Filled.Close, contentDescription = "Clear selection")
                         }
                     },
                     title = {
                         Text(
                             text = "${uiState.selectedItemIds.size} selected",
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     actions = {
@@ -173,6 +192,12 @@ fun RecycleBinScreen(
                         onColumnsChanged = viewModel::setGridColumns,
                         minColumns = 2,
                         maxColumns = 7,
+                        gridState = gridState,
+                        initialFirstVisibleItemIndex = savedScroll.index,
+                        initialFirstVisibleItemScrollOffset = savedScroll.offset,
+                        onScrollPositionChanged = { idx, off ->
+                            viewModel.saveGridScrollPosition("recycle_bin", idx, off)
+                        },
                         modifier = Modifier.fillMaxSize(),
                         overlayContent = { activeGridState, _ ->
                             // Fast Scrollbar overlaid on deleted items grid
@@ -210,6 +235,7 @@ fun RecycleBinScreen(
                                         if (uiState.isSelectionMode) {
                                             viewModel.toggleSelection(item.id)
                                         } else {
+                                            viewModel.saveGridScrollPosition("recycle_bin", layerGridState.firstVisibleItemIndex, layerGridState.firstVisibleItemScrollOffset)
                                             // In non-selection mode: open action sheet/dialog giving explicit choice
                                             itemForActionSheet = item
                                         }
@@ -244,6 +270,8 @@ fun RecycleBinScreen(
     itemForActionSheet?.let { item ->
         AlertDialog(
             onDismissRequest = { itemForActionSheet = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             title = {
                 Text(
                     text = item.originalName,
@@ -346,6 +374,8 @@ fun RecycleBinScreen(
     if (showEmptyBinDialog) {
         AlertDialog(
             onDismissRequest = { showEmptyBinDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Empty Recycle Bin?") },
             text = { Text("Delete permanently? All ${uiState.items.size} item(s) cannot be recovered.") },
@@ -370,6 +400,8 @@ fun RecycleBinScreen(
     itemToDeletePermanently?.let { item ->
         AlertDialog(
             onDismissRequest = { itemToDeletePermanently = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Delete permanently?") },
             text = { Text("Delete permanently? This item cannot be recovered.") },
@@ -394,6 +426,8 @@ fun RecycleBinScreen(
     if (showDeleteSelectedDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteSelectedDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.DeleteForever, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Delete permanently?") },
             text = { Text("Delete permanently? ${uiState.selectedItemIds.size} item(s) cannot be recovered.") },
@@ -572,7 +606,12 @@ private fun RecycleBinThumbnailCard(
                             .padding(2.dp)
                     )
                 }
-                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                ) {
                     DropdownMenuItem(
                         text = { Text("Restore") },
                         leadingIcon = { Icon(Icons.Outlined.RestoreFromTrash, null) },

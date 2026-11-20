@@ -3,7 +3,9 @@ package com.gallery.feature.editor.ui
 import android.app.Activity
 import android.content.Context
 import android.net.Uri
+import android.view.WindowManager
 import android.webkit.MimeTypeMap
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -44,6 +46,8 @@ import java.io.File
 fun EditorScreen(
     mediaUriString: String,
     isVideo: Boolean = false,
+    isVault: Boolean = false,
+    vaultItemId: String = "",
     onBack: () -> Unit,
     viewModel: EditorViewModel = hiltViewModel()
 ) {
@@ -60,12 +64,45 @@ fun EditorScreen(
         return
     }
 
+    val isFromVault = remember(mediaUriString, isVault) {
+        isVault || mediaUriString.contains("vault_secure_temp") || mediaUriString.contains(".vault")
+    }
+
+    DisposableEffect(isFromVault) {
+        val window = (context as? android.app.Activity)?.window
+        if (isFromVault) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+        onDispose {
+            if (isFromVault) {
+                window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+    }
+
+    fun handleBack() {
+        if (isFromVault) {
+            try {
+                File(context.cacheDir, "vault_secure_temp").listFiles { _, name -> name.startsWith("crop_") }?.forEach { it.delete() }
+                context.cacheDir.listFiles { _, name -> name.startsWith("crop_") }?.forEach { it.delete() }
+            } catch (_: Exception) {}
+        }
+        onBack()
+    }
+
+    BackHandler {
+        handleBack()
+    }
+
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     var showAdjustPanel by remember { mutableStateOf(false) }
 
-    LaunchedEffect(mediaUriString) {
+    LaunchedEffect(mediaUriString, isFromVault, vaultItemId) {
         val uri = Uri.parse(mediaUriString)
         viewModel.setSourceUri(uri)
+        if (isFromVault) {
+            viewModel.setIsVault(true, vaultItemId)
+        }
     }
 
     // UCrop Activity Result Launcher
@@ -103,7 +140,7 @@ fun EditorScreen(
             TopAppBar(
                 title = { Text("Photo Editor", fontWeight = FontWeight.SemiBold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = ::handleBack) {
                         Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back")
                     }
                 },
@@ -111,8 +148,13 @@ fun EditorScreen(
                     IconButton(
                         onClick = {
                             uiState.sourceUri?.let { sourceUri ->
+                                val destFolder = if (isFromVault) {
+                                    File(context.cacheDir, "vault_secure_temp").apply { mkdirs() }
+                                } else {
+                                    context.cacheDir
+                                }
                                 val destinationUri = Uri.fromFile(
-                                    File(context.cacheDir, "crop_${System.currentTimeMillis()}.jpg")
+                                    File(destFolder, "crop_${System.currentTimeMillis()}.jpg")
                                 )
                                 val uCrop = UCrop.of(sourceUri, destinationUri)
                                     .withOptions(UCrop.Options().apply {
@@ -282,7 +324,7 @@ fun EditorScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedButton(
-                    onClick = onBack,
+                    onClick = ::handleBack,
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.4f))
@@ -292,7 +334,7 @@ fun EditorScreen(
                 Button(
                     onClick = {
                         viewModel.saveEdit { _ ->
-                            onBack()
+                            handleBack()
                         }
                     },
                     enabled = !uiState.isSaving,

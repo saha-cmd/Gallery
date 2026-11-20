@@ -59,6 +59,8 @@ fun MoveAlbumToVaultDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp,
         icon = {
             Icon(
                 Icons.Outlined.Lock,

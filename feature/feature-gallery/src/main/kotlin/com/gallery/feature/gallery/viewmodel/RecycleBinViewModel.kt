@@ -4,6 +4,7 @@ import android.content.IntentSender
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallery.core.domain.model.RecycleBinItem
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.domain.usecase.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +48,20 @@ class RecycleBinViewModel @Inject constructor(
 
     val gridColumns: StateFlow<Int> = getDefaultGridColumnsUseCase()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 4)
+
+    private val gridScrollPositions = java.util.concurrent.ConcurrentHashMap<String, GridScrollPosition>()
+
+    fun saveGridScrollPosition(key: String, index: Int, offset: Int) {
+        gridScrollPositions[key] = GridScrollPosition(index.coerceAtLeast(0), offset.coerceAtLeast(0))
+    }
+
+    fun getGridScrollPosition(key: String): GridScrollPosition {
+        return gridScrollPositions[key] ?: GridScrollPosition()
+    }
+
+    fun clearGridScrollPosition(key: String) {
+        gridScrollPositions.remove(key)
+    }
 
     fun setGridColumns(columns: Int) {
         viewModelScope.launch {

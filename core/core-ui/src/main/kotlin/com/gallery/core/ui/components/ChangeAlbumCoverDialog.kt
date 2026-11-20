@@ -52,6 +52,8 @@ fun ChangeAlbumCoverDialog(
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp,
         icon = {
             Icon(
                 imageVector = Icons.Outlined.Image,

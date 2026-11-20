@@ -14,8 +14,13 @@ import com.gallery.core.domain.model.AppUpdateInfo
 import com.gallery.core.domain.model.AppUpdateState
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.domain.model.MoveAlbumResult
+import com.gallery.core.domain.model.PendingVaultItem
+import com.gallery.core.domain.model.StagedVaultItem
 import com.gallery.core.domain.model.UserAlbumGroup
+import com.gallery.core.domain.model.VaultMoveRequest
+import com.gallery.core.domain.model.VaultMoveResult
 import com.gallery.core.domain.model.resolveFirstCoverUri
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.domain.repository.AppUpdateRepository
 import com.gallery.core.domain.repository.MediaRepository
 import com.gallery.core.domain.usecase.AddAlbumsToUserGroupUseCase
@@ -116,7 +121,11 @@ data class GalleryUiState(
     val selectedAlbumIds: Set<Long> = emptySet(),
     val isPerformingBatchAction: Boolean = false,
     val batchActionMessage: String? = null,
+    val showDirectTransferPermissionDialog: Boolean = false,
     val pendingDeleteIntentSender: IntentSender? = null,
+    val pendingVaultDeleteIntentSender: IntentSender? = null,
+    val pendingVaultItems: List<StagedVaultItem> = emptyList(),
+    val pendingStagedVaultItems: List<StagedVaultItem> = emptyList(),
     val pendingMoveIntentSender: IntentSender? = null,
     val pendingMoveItems: List<MediaItem>? = null,
     val pendingTargetAlbum: Album? = null,
@@ -242,11 +251,29 @@ class GalleryViewModel @Inject constructor(
         }
     }
 
+    private val gridScrollPositions = java.util.concurrent.ConcurrentHashMap<String, GridScrollPosition>()
+
+    fun saveGridScrollPosition(key: String, index: Int, offset: Int) {
+        gridScrollPositions[key] = GridScrollPosition(index.coerceAtLeast(0), offset.coerceAtLeast(0))
+    }
+
+    fun getGridScrollPosition(key: String): GridScrollPosition {
+        return gridScrollPositions[key] ?: GridScrollPosition()
+    }
+
+    fun clearGridScrollPosition(key: String) {
+        gridScrollPositions.remove(key)
+    }
+
     fun selectAlbum(album: Album) {
         selectedAlbum.value = album
     }
 
     fun closeAlbum() {
+        val current = selectedAlbum.value
+        if (current != null) {
+            clearGridScrollPosition("album_${current.id}")
+        }
         selectedAlbum.value = null
     }
 
@@ -744,88 +771,83 @@ class GalleryViewModel @Inject constructor(
         val albumsToMove = _uiState.value.selectedAlbums
         if (albumsToMove.isEmpty()) return
 
+        val allItemsWithTarget = mutableListOf<Pair<MediaItem, String>>()
+        for (album in albumsToMove) {
+            val targetAlbum = if (keepOriginalAlbumNames) album.name else customTargetAlbumName.ifBlank { "Default" }
+            for (item in album.items) {
+                allItemsWithTarget.add(item to targetAlbum)
+            }
+        }
+
+        if (allItemsWithTarget.isEmpty()) {
+            clearAlbumSelection()
+            return
+        }
+
+        val requests = allItemsWithTarget.map { (item, targetVaultAlbum) ->
+            val mimeType = when (item) {
+                is MediaItem.Photo -> item.mimeType
+                is MediaItem.Video -> "video/*"
+            }
+            VaultMoveRequest(
+                sourceUri = item.uri,
+                originalName = item.name,
+                mimeType = mimeType,
+                isVideo = item is MediaItem.Video,
+                albumName = targetVaultAlbum,
+                mediaId = item.id
+            )
+        }
+
+        val customAlbumIdsToDelete = albumsToMove.filter { it.isCustom }.map { it.id }
+
         viewModelScope.launch {
-            val allItemsWithTarget = mutableListOf<Pair<MediaItem, String>>()
-            for (album in albumsToMove) {
-                val targetAlbum = if (keepOriginalAlbumNames) album.name else customTargetAlbumName.ifBlank { "Default" }
-                for (item in album.items) {
-                    allItemsWithTarget.add(item to targetAlbum)
-                }
-            }
-
-            if (allItemsWithTarget.isEmpty()) {
-                clearAlbumSelection()
-                return@launch
-            }
-
             _uiState.update {
                 it.copy(
                     isPerformingBatchAction = true,
-                    batchActionMessage = "Moving to Secure Vault (0 / ${allItemsWithTarget.size})..."
+                    batchActionMessage = "Securing ${allItemsWithTarget.size} item(s) from ${albumsToMove.size} album(s)..."
                 )
             }
 
-            val movedIds = mutableListOf<Long>()
-            val total = allItemsWithTarget.size
+            val result = withContext(Dispatchers.IO) {
+                addToVaultUseCase.moveMultiple(requests)
+            }
 
-            withContext(Dispatchers.IO) {
-                allItemsWithTarget.forEachIndexed { index, (item, targetVaultAlbum) ->
-                    val mimeType = when (item) {
-                        is MediaItem.Photo -> item.mimeType
-                        is MediaItem.Video -> "video/*"
-                    }
-                    val result = addToVaultUseCase(
-                        sourceUri = item.uri,
-                        originalName = item.name,
-                        mimeType = mimeType,
-                        isVideo = item is MediaItem.Video,
-                        albumName = targetVaultAlbum
-                    )
-                    if (result.isSuccess) {
-                        movedIds.add(item.id)
-                    }
-                    if ((index + 1) % 5 == 0 || index + 1 == total) {
-                        _uiState.update {
-                            it.copy(batchActionMessage = "Moving to Secure Vault (${index + 1} / $total)...")
-                        }
-                    }
-                }
-
-                for (album in albumsToMove) {
-                    if (album.isCustom) {
-                        val dbId = if (Album.isCustomAlbumId(album.id)) Album.fromCustomAlbumDisplayId(album.id) else album.id
+            when (result) {
+                is VaultMoveResult.Success -> {
+                    customAlbumIdsToDelete.forEach { albumId ->
+                        val dbId = if (Album.isCustomAlbumId(albumId)) Album.fromCustomAlbumDisplayId(albumId) else albumId
                         deleteCustomAlbumUseCase(dbId)
                     }
+                    val movedIds = allItemsWithTarget.map { it.first.id }.toSet()
+                    applyVaultMoveSuccess(movedIds, "Moved ${movedIds.size} item(s) from ${albumsToMove.size} album(s) to Secure Vault")
                 }
-            }
-
-            _uiState.update { current ->
-                val remainingMedia = current.allMedia.filter { it.id !in movedIds }
-                val remainingAlbums = current.albums.mapNotNull { album ->
-                    if (album.id in albumsToMove.map { it.id } && album.isCustom) {
-                        null
-                    } else {
-                        val filtered = album.items.filter { it.id !in movedIds }
-                        if (filtered.size != album.items.size) {
-                            album.copy(
-                                items = filtered,
-                                itemCount = filtered.size,
-                                coverUri = filtered.resolveFirstCoverUri() ?: Uri.EMPTY
-                            )
-                        } else album
+                is VaultMoveResult.RequiresConsent -> {
+                    _uiState.update {
+                        it.copy(
+                            isPerformingBatchAction = false,
+                            batchActionMessage = null,
+                            showDirectTransferPermissionDialog = true,
+                            pendingVaultDeleteIntentSender = result.intentSender,
+                            pendingDeleteIntentSender = result.intentSender,
+                            pendingStagedVaultItems = result.pendingItems,
+                            pendingVaultItems = result.pendingItems
+                        )
                     }
                 }
-                current.copy(
-                    allMedia = remainingMedia,
-                    mediaGroups = remainingMedia.groupByDay(),
-                    monthlyMediaGroups = remainingMedia.groupByMonth(),
-                    albums = remainingAlbums,
-                    videos = remainingMedia.filterIsInstance<MediaItem.Video>(),
-                    isPerformingBatchAction = false,
-                    batchActionMessage = null,
-                    selectedAlbumIds = emptySet(),
-                    error = "Moved ${movedIds.size} item(s) from ${albumsToMove.size} album(s) to Secure Vault"
-                )
+                is VaultMoveResult.Failure -> {
+                    _uiState.update {
+                        it.copy(
+                            isPerformingBatchAction = false,
+                            batchActionMessage = null,
+                            pendingVaultDeleteIntentSender = null,
+                            pendingDeleteIntentSender = null,
+                            pendingStagedVaultItems = emptyList(),
+                            pendingVaultItems = emptyList(),
+                            error = "Failed to move albums: ${result.message}"
+                        )
+                    }
+                }
             }
         }
     }
@@ -937,65 +959,176 @@ class GalleryViewModel @Inject constructor(
     fun moveItemsToVault(items: List<MediaItem>, albumName: String = "Default") {
         if (items.isEmpty()) return
 
+        val requests = items.map { item ->
+            val mimeType = when (item) {
+                is MediaItem.Photo -> item.mimeType
+                is MediaItem.Video -> "video/*"
+            }
+            VaultMoveRequest(
+                sourceUri = item.uri,
+                originalName = item.name,
+                mimeType = mimeType,
+                isVideo = item is MediaItem.Video,
+                albumName = albumName,
+                mediaId = item.id
+            )
+        }
+
         viewModelScope.launch {
-            _uiState.update { it.copy(isPerformingBatchAction = true, batchActionMessage = "Moving to Secure Folder...") }
-            val movedIds = mutableListOf<Long>()
-
-            withContext(Dispatchers.IO) {
-                for (item in items) {
-                    val mimeType = when (item) {
-                        is MediaItem.Photo -> item.mimeType
-                        is MediaItem.Video -> "video/*"
-                    }
-                    val result = addToVaultUseCase(
-                        sourceUri = item.uri,
-                        originalName = item.name,
-                        mimeType = mimeType,
-                        isVideo = item is MediaItem.Video,
-                        albumName = albumName
-                    )
-                    if (result.isSuccess) {
-                        movedIds.add(item.id)
-                    }
-                }
+            _uiState.update { it.copy(isPerformingBatchAction = true, batchActionMessage = "Moving ${items.size} item(s) to Secure Folder...") }
+            val result = withContext(Dispatchers.IO) {
+                addToVaultUseCase.moveMultiple(requests)
             }
 
-            // Immediately remove the moved items from all main gallery views without prompting any dialog
-            _uiState.update { current ->
-                val remainingMedia = current.allMedia.filter { it.id !in movedIds }
-                val remainingAlbums = current.albums.map { album ->
-                    val filtered = album.items.filter { it.id !in movedIds }
-                    if (filtered.size != album.items.size) {
-                        album.copy(
-                            items = filtered,
-                            itemCount = filtered.size,
-                            coverUri = filtered.resolveFirstCoverUri() ?: Uri.EMPTY
+            when (result) {
+                is VaultMoveResult.Success -> {
+                    val movedIds = items.map { it.id }.toSet()
+                    applyVaultMoveSuccess(movedIds, "Moved ${items.size} item(s) to Secure Folder")
+                }
+                is VaultMoveResult.RequiresConsent -> {
+                    _uiState.update {
+                        it.copy(
+                            isPerformingBatchAction = false,
+                            batchActionMessage = null,
+                            showDirectTransferPermissionDialog = true,
+                            pendingVaultDeleteIntentSender = result.intentSender,
+                            pendingDeleteIntentSender = result.intentSender,
+                            pendingStagedVaultItems = result.pendingItems,
+                            pendingVaultItems = result.pendingItems
                         )
-                    } else album
+                    }
                 }
-                current.copy(
-                    allMedia = remainingMedia,
-                    mediaGroups = remainingMedia.groupByDay(),
-                    monthlyMediaGroups = remainingMedia.groupByMonth(),
-                    albums = remainingAlbums,
-                    videos = remainingMedia.filterIsInstance<MediaItem.Video>(),
-                    isPerformingBatchAction = false,
-                    batchActionMessage = null,
-                    selectedItemIds = emptySet(),
-                    pendingDeleteIntentSender = null
-                )
+                is VaultMoveResult.Failure -> {
+                    _uiState.update {
+                        it.copy(
+                            isPerformingBatchAction = false,
+                            batchActionMessage = null,
+                            pendingVaultDeleteIntentSender = null,
+                            pendingDeleteIntentSender = null,
+                            pendingStagedVaultItems = emptyList(),
+                            pendingVaultItems = emptyList(),
+                            error = "Failed to move to Secure Folder: ${result.message}"
+                        )
+                    }
+                }
             }
-            selectedAlbum.update { currentAlbum ->
-                currentAlbum?.let { album ->
-                    val remainingItems = album.items.filter { it.id !in movedIds }
-                    album.copy(
-                        items = remainingItems,
-                        itemCount = remainingItems.size,
-                        coverUri = remainingItems.resolveFirstCoverUri() ?: Uri.EMPTY
+        }
+    }
+
+    fun onVaultDeleteConfirmed() {
+        val pending = _uiState.value.pendingStagedVaultItems.ifEmpty { _uiState.value.pendingVaultItems }
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isPerformingBatchAction = true, batchActionMessage = "Moving to Secure Folder...", showDirectTransferPermissionDialog = false) }
+            val result = addToVaultUseCase.commitStagedVaultItems(pending)
+            if (result.isSuccess) {
+                val movedMediaIds = pending.mapNotNull { if (it.sourceMediaId > 0L) it.sourceMediaId else null }.toSet()
+                val movedUris = pending.map { it.sourceUri }.toSet()
+                val allMovedIds = if (movedMediaIds.isNotEmpty()) {
+                    movedMediaIds
+                } else {
+                    _uiState.value.allMedia.filter { it.uri in movedUris }.map { it.id }.toSet()
+                }
+                applyVaultMoveSuccess(allMovedIds, "Moved ${pending.size} item(s) to Secure Folder")
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isPerformingBatchAction = false,
+                        batchActionMessage = null,
+                        showDirectTransferPermissionDialog = false,
+                        pendingVaultDeleteIntentSender = null,
+                        pendingDeleteIntentSender = null,
+                        pendingStagedVaultItems = emptyList(),
+                        pendingVaultItems = emptyList(),
+                        error = "Failed to move to Secure Folder: ${result.exceptionOrNull()?.message}"
                     )
                 }
             }
         }
+    }
+
+    fun confirmPendingVaultMove() = onVaultDeleteConfirmed()
+
+    fun onVaultDeleteCancelled() {
+        val pending = _uiState.value.pendingStagedVaultItems.ifEmpty { _uiState.value.pendingVaultItems }
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            addToVaultUseCase.rollbackStagedVaultItems(pending)
+            _uiState.update {
+                it.copy(
+                    isPerformingBatchAction = false,
+                    batchActionMessage = null,
+                    showDirectTransferPermissionDialog = false,
+                    pendingVaultDeleteIntentSender = null,
+                    pendingDeleteIntentSender = null,
+                    pendingStagedVaultItems = emptyList(),
+                    pendingVaultItems = emptyList(),
+                    error = "Move to Secure Folder cancelled"
+                )
+            }
+        }
+    }
+
+    fun cancelPendingVaultMove() = onVaultDeleteCancelled()
+
+    fun dismissDirectTransferPermissionDialog() {
+        _uiState.update { it.copy(showDirectTransferPermissionDialog = false) }
+    }
+
+    fun clearPendingVaultDeleteIntent() {
+        _uiState.update {
+            it.copy(
+                pendingVaultDeleteIntentSender = null,
+                pendingDeleteIntentSender = null
+            )
+        }
+    }
+
+    private fun applyVaultMoveSuccess(movedIds: Set<Long>, message: String) {
+        _uiState.update { current ->
+            val remainingMedia = current.allMedia.filter { it.id !in movedIds }
+            val remainingAlbums = current.albums.mapNotNull { album ->
+                val filtered = album.items.filter { it.id !in movedIds }
+                if (filtered.isEmpty() && album.isCustom) {
+                    null
+                } else if (filtered.size != album.items.size) {
+                    album.copy(
+                        items = filtered,
+                        itemCount = filtered.size,
+                        coverUri = filtered.resolveFirstCoverUri() ?: Uri.EMPTY
+                    )
+                } else album
+            }
+            current.copy(
+                allMedia = remainingMedia,
+                mediaGroups = remainingMedia.groupByDay(),
+                monthlyMediaGroups = remainingMedia.groupByMonth(),
+                albums = remainingAlbums,
+                videos = remainingMedia.filterIsInstance<MediaItem.Video>(),
+                isPerformingBatchAction = false,
+                batchActionMessage = null,
+                selectedItemIds = current.selectedItemIds - movedIds,
+                selectedAlbumIds = emptySet(),
+                pendingVaultDeleteIntentSender = null,
+                pendingDeleteIntentSender = null,
+                pendingStagedVaultItems = emptyList(),
+                pendingVaultItems = emptyList(),
+                showDirectTransferPermissionDialog = false,
+                error = message
+            )
+        }
+        selectedAlbum.update { currentAlbum ->
+            currentAlbum?.let { album ->
+                val remainingItems = album.items.filter { it.id !in movedIds }
+                album.copy(
+                    items = remainingItems,
+                    itemCount = remainingItems.size,
+                    coverUri = remainingItems.resolveFirstCoverUri() ?: Uri.EMPTY
+                )
+            }
+        }
+        clearSelection()
+        clearAlbumSelection()
     }
 
     // ── Move To Album Operations ────────────────────────────────────────────

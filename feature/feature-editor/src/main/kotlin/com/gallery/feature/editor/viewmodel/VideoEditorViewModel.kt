@@ -27,6 +27,7 @@ import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
+import com.gallery.core.domain.repository.VaultRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -180,7 +181,8 @@ class ColorMatrixRgbEffect(
 
 @HiltViewModel
 class VideoEditorViewModel @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val vaultRepository: VaultRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(VideoEditorUiState())
@@ -545,7 +547,29 @@ class VideoEditorViewModel @Inject constructor(
         _uiState.update { it.copy(isExporting = false, exportProgress = 0) }
     }
 
-    private fun saveExportedVideoToMediaStore(sourceFile: File): Result<Uri> {
+    private suspend fun saveExportedVideoToMediaStore(sourceFile: File): Result<Uri> {
+        val isVault = _uiState.value.sourceUri?.toString()?.contains("vault") == true
+        if (isVault) {
+            return try {
+                val result = vaultRepository.addFileToVault(
+                    file = sourceFile,
+                    originalName = "VID_EDITED_${System.currentTimeMillis()}.mp4",
+                    mimeType = "video/mp4",
+                    isVideo = true,
+                    albumName = "Default"
+                )
+                if (result.isSuccess) {
+                    Result.success(Uri.EMPTY)
+                } else {
+                    Result.failure(result.exceptionOrNull() ?: Exception("Failed to encrypt video to Secure Vault"))
+                }
+            } catch (e: Exception) {
+                Result.failure(e)
+            } finally {
+                if (sourceFile.exists()) sourceFile.delete()
+            }
+        }
+
         return try {
             if (!sourceFile.exists() || sourceFile.length() <= 0L) {
                 return Result.failure(IllegalStateException("Exported video file is empty"))

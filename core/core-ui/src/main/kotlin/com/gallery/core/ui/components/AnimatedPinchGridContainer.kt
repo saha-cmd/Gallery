@@ -26,6 +26,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
@@ -103,6 +104,10 @@ fun AnimatedPinchGridContainer(
     minColumns: Int = 2,
     maxColumns: Int = 7,
     enabled: Boolean = true,
+    gridState: LazyGridState? = null,
+    initialFirstVisibleItemIndex: Int = 0,
+    initialFirstVisibleItemScrollOffset: Int = 0,
+    onScrollPositionChanged: ((index: Int, offset: Int) -> Unit)? = null,
     onResolveTargetAnchorIndex: ((sourceColumns: Int, targetColumns: Int, sourceAnchorIndex: Int) -> Int)? = null,
     overlayContent: @Composable BoxScope.(activeGridState: LazyGridState, activeColumns: Int) -> Unit = { _, _ -> },
     gridContent: @Composable (columns: Int, state: LazyGridState, isPreviewLayer: Boolean, tileAspectRatio: Float) -> Unit
@@ -118,7 +123,10 @@ fun AnimatedPinchGridContainer(
             GridLayer(
                 id = 1,
                 columns = initialColumns,
-                state = createViewportOnlyLazyGridState()
+                state = gridState ?: createViewportOnlyLazyGridState(
+                    firstVisibleItemIndex = initialFirstVisibleItemIndex,
+                    firstVisibleItemScrollOffset = initialFirstVisibleItemScrollOffset
+                )
             )
         )
     }
@@ -129,6 +137,24 @@ fun AnimatedPinchGridContainer(
     var lastObservedExternalColumns by remember { mutableIntStateOf(initialColumns) }
 
     val activeColumns = activeLayer.columns.coerceIn(minColumns, maxColumns)
+
+    val latestOnScrollPositionChanged by rememberUpdatedState(onScrollPositionChanged)
+
+    // Continuously sync active layer scroll position as user scrolls
+    LaunchedEffect(activeLayer.state) {
+        val currentState = activeLayer.state
+        snapshotFlow {
+            Triple(
+                currentState.firstVisibleItemIndex,
+                currentState.firstVisibleItemScrollOffset,
+                currentState.isScrollInProgress
+            )
+        }.collect { (idx, off, isScrolling) ->
+            if (isScrolling || idx > 0 || off > 0) {
+                latestOnScrollPositionChanged?.invoke(idx, off)
+            }
+        }
+    }
 
     // Smoothly interpolate vertical tile proportions across 3 <-> 4 columns without mid-pinch jumps
     val animatedTileAspectRatio by animateFloatAsState(

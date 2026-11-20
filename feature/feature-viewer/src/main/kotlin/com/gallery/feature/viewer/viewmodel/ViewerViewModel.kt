@@ -12,6 +12,9 @@ import com.gallery.core.data.repository.MediaRepositoryImpl
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.domain.model.MoveAlbumResult
+import com.gallery.core.domain.model.PendingVaultItem
+import com.gallery.core.domain.model.StagedVaultItem
+import com.gallery.core.domain.model.VaultMoveResult
 import com.gallery.core.domain.repository.SettingsRepository
 import com.gallery.core.domain.usecase.AddItemsToCustomAlbumUseCase
 import com.gallery.core.domain.usecase.AddToVaultUseCase
@@ -46,7 +49,11 @@ import javax.inject.Inject
 data class ViewerUiState(
     val mediaList: List<MediaItem> = emptyList(),
     val isLoading: Boolean = true,
+    val showDirectTransferPermissionDialog: Boolean = false,
     val pendingDeleteIntentSender: IntentSender? = null,
+    val pendingVaultDeleteIntentSender: IntentSender? = null,
+    val pendingVaultItems: List<StagedVaultItem> = emptyList(),
+    val pendingStagedVaultItems: List<StagedVaultItem> = emptyList(),
     val pendingMoveIntentSender: IntentSender? = null,
     val pendingMoveItem: MediaItem? = null,
     val pendingTargetAlbum: Album? = null,
@@ -175,7 +182,12 @@ class ViewerViewModel @Inject constructor(
     }
 
     fun clearPendingDeleteIntent() {
-        _uiState.update { it.copy(pendingDeleteIntentSender = null) }
+        _uiState.update {
+            it.copy(
+                pendingDeleteIntentSender = null,
+                pendingVaultDeleteIntentSender = null
+            )
+        }
     }
 
     fun dismissInfoMessage() {
@@ -275,23 +287,106 @@ class ViewerViewModel @Inject constructor(
                     originalName = item.name,
                     mimeType = mimeType,
                     isVideo = item is MediaItem.Video,
-                    albumName = albumName
+                    albumName = albumName,
+                    mediaId = item.id
                 )
             }
 
+            when (result) {
+                is VaultMoveResult.Success -> {
+                    _uiState.update {
+                        it.copy(
+                            pendingVaultDeleteIntentSender = null,
+                            pendingDeleteIntentSender = null,
+                            pendingStagedVaultItems = emptyList(),
+                            pendingVaultItems = emptyList(),
+                            itemMovedToVault = true,
+                            infoMessage = "${item.name} moved to Secure Folder"
+                        )
+                    }
+                }
+                is VaultMoveResult.RequiresConsent -> {
+                    _uiState.update {
+                        it.copy(
+                            showDirectTransferPermissionDialog = true,
+                            pendingVaultDeleteIntentSender = result.intentSender,
+                            pendingDeleteIntentSender = result.intentSender,
+                            pendingStagedVaultItems = result.pendingItems,
+                            pendingVaultItems = result.pendingItems
+                        )
+                    }
+                }
+                is VaultMoveResult.Failure -> {
+                    _uiState.update {
+                        it.copy(
+                            pendingVaultDeleteIntentSender = null,
+                            pendingDeleteIntentSender = null,
+                            pendingStagedVaultItems = emptyList(),
+                            pendingVaultItems = emptyList(),
+                            infoMessage = "Failed to secure: ${result.message}"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun onVaultDeleteConfirmed() {
+        val pending = _uiState.value.pendingStagedVaultItems.ifEmpty { _uiState.value.pendingVaultItems }
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            val result = addToVaultUseCase.commitStagedVaultItems(pending)
             if (result.isSuccess) {
                 _uiState.update {
                     it.copy(
+                        showDirectTransferPermissionDialog = false,
+                        pendingVaultDeleteIntentSender = null,
                         pendingDeleteIntentSender = null,
-                        itemMovedToVault = true
+                        pendingStagedVaultItems = emptyList(),
+                        pendingVaultItems = emptyList(),
+                        itemMovedToVault = true,
+                        infoMessage = "Moved to Secure Folder"
                     )
                 }
             } else {
                 _uiState.update {
-                    it.copy(infoMessage = "Failed to secure: ${result.exceptionOrNull()?.message}")
+                    it.copy(
+                        showDirectTransferPermissionDialog = false,
+                        pendingVaultDeleteIntentSender = null,
+                        pendingDeleteIntentSender = null,
+                        pendingStagedVaultItems = emptyList(),
+                        pendingVaultItems = emptyList(),
+                        infoMessage = "Failed to finalize move: ${result.exceptionOrNull()?.message}"
+                    )
                 }
             }
         }
+    }
+
+    fun confirmPendingVaultMove() = onVaultDeleteConfirmed()
+
+    fun onVaultDeleteCancelled() {
+        val pending = _uiState.value.pendingStagedVaultItems.ifEmpty { _uiState.value.pendingVaultItems }
+        if (pending.isEmpty()) return
+        viewModelScope.launch {
+            addToVaultUseCase.rollbackStagedVaultItems(pending)
+            _uiState.update {
+                it.copy(
+                    showDirectTransferPermissionDialog = false,
+                    pendingVaultDeleteIntentSender = null,
+                    pendingDeleteIntentSender = null,
+                    pendingStagedVaultItems = emptyList(),
+                    pendingVaultItems = emptyList(),
+                    infoMessage = "Move to Secure Folder cancelled"
+                )
+            }
+        }
+    }
+
+    fun cancelPendingVaultMove() = onVaultDeleteCancelled()
+
+    fun dismissDirectTransferPermissionDialog() {
+        _uiState.update { it.copy(showDirectTransferPermissionDialog = false) }
     }
 
     companion object {

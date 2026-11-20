@@ -42,7 +42,7 @@ private val DarkColorScheme = darkColorScheme(
     outline = OutlineDark
 )
 
-private val AmoledColorScheme = DarkColorScheme.toAmoledColorScheme()
+private val AmoledColorScheme = DarkColorScheme.toAmoledColorScheme(useAmoledPrimary = true)
 
 private val LightColorScheme = lightColorScheme(
     primary = PrimaryLight,
@@ -70,18 +70,22 @@ private val LightColorScheme = lightColorScheme(
     outline = OutlineLight
 )
 
-private fun ColorScheme.toAmoledColorScheme(): ColorScheme = copy(
+private fun ColorScheme.toAmoledColorScheme(useAmoledPrimary: Boolean = false): ColorScheme = copy(
+    primary = if (useAmoledPrimary) PrimaryAmoled else primary,
     background = BackgroundAmoled,
     onBackground = OnBackgroundAmoled,
     surface = SurfaceAmoled,
     onSurface = OnSurfaceAmoled,
+    onSurfaceVariant = OnSurfaceVariantAmoled,
     surfaceDim = SurfaceAmoled,
+    surfaceBright = SurfaceContainerHighestAmoled,
     surfaceContainerLowest = SurfaceContainerLowestAmoled,
     surfaceContainerLow = SurfaceContainerLowAmoled,
     surfaceContainer = SurfaceContainerAmoled,
     surfaceContainerHigh = SurfaceContainerHighAmoled,
     surfaceContainerHighest = SurfaceContainerHighestAmoled,
     surfaceVariant = SurfaceVariantAmoled,
+    outline = OutlineAmoled,
     outlineVariant = OutlineVariantAmoled
 )
 

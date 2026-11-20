@@ -1,5 +1,6 @@
 package com.gallery.feature.vault.ui
 
+import android.view.WindowManager
 import androidx.biometric.BiometricManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -37,6 +38,15 @@ fun VaultAuthScreen(
     val authState by viewModel.authState.collectAsStateWithLifecycle()
     val pinState by viewModel.pinState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+
+    // Block screenshots and screen recordings on Auth screen
+    DisposableEffect(Unit) {
+        val window = (context as? android.app.Activity)?.window
+        window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
+    }
 
     // Navigate on success
     LaunchedEffect(authState) {

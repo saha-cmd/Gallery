@@ -15,6 +15,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.gallery.core.domain.repository.VaultRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -47,16 +48,23 @@ data class EditorUiState(
     val isSaving: Boolean = false,
     val isSaved: Boolean = false,
     val savedUri: Uri? = null,
-    val error: String? = null
+    val error: String? = null,
+    val isVaultItem: Boolean = false,
+    val vaultItemId: String? = null
 )
 
 @HiltViewModel
 class EditorViewModel @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val vaultRepository: VaultRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(EditorUiState())
     val uiState: StateFlow<EditorUiState> = _uiState.asStateFlow()
+
+    fun setIsVault(isVault: Boolean, vaultItemId: String? = null) {
+        _uiState.update { it.copy(isVaultItem = isVault, vaultItemId = vaultItemId) }
+    }
 
     fun setSourceUri(uri: Uri) {
         _uiState.update { it.copy(sourceUri = uri) }
@@ -144,7 +152,37 @@ class EditorViewModel @Inject constructor(
 
                     if (rotatedBitmap != finalBitmap) rotatedBitmap.recycle()
 
-                    // 4. Save to Scoped Storage (Pictures/Gallery)
+                    // If editing an item from Secure Vault, encrypt directly into vault storage without public MediaStore exposure
+                    if (state.isVaultItem) {
+                        val cacheFolder = File(context.cacheDir, "vault_secure_temp").apply { mkdirs() }
+                        val tempEditFile = File(cacheFolder, "vault_edit_${System.currentTimeMillis()}.jpg")
+                        tempEditFile.outputStream().use { out ->
+                            finalBitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)
+                        }
+                        finalBitmap.recycle()
+
+                        val vaultResult = vaultRepository.addFileToVault(
+                            file = tempEditFile,
+                            originalName = "IMG_EDIT_${System.currentTimeMillis()}.jpg",
+                            mimeType = "image/jpeg",
+                            isVideo = false,
+                            albumName = "Default"
+                        )
+
+                        // Immediately purge any temporary UCrop output files
+                        try {
+                            context.cacheDir.listFiles { _, name -> name.startsWith("crop_") }?.forEach { it.delete() }
+                            cacheFolder.listFiles { _, name -> name.startsWith("crop_") }?.forEach { it.delete() }
+                        } catch (_: Exception) {}
+
+                        if (vaultResult.isSuccess) {
+                            return@withContext Result.success(Uri.EMPTY)
+                        } else {
+                            return@withContext Result.failure(vaultResult.exceptionOrNull() ?: Exception("Failed to save to Secure Vault"))
+                        }
+                    }
+
+                    // 4. Save to Scoped Storage (Pictures/Gallery) for regular media
                     val fileName = "IMG_EDIT_${System.currentTimeMillis()}.jpg"
                     val contentValues = ContentValues().apply {
                         put(MediaStore.Images.Media.DISPLAY_NAME, fileName)

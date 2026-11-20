@@ -31,18 +31,21 @@ val SurfaceVariantDark = Color(0xFF42474E)
 val OnSurfaceVariantDark = Color(0xFFC2C7CF)
 val OutlineDark = Color(0xFF8C9199)
 
-// Pure pitch-black AMOLED surfaces
+// Pure pitch-black AMOLED canvas with dark-slate container hierarchy & soft off-white typography
+val PrimaryAmoled = Color(0xFF8AB4F8)
 val BackgroundAmoled = Color(0xFF000000)
-val OnBackgroundAmoled = Color.White
+val OnBackgroundAmoled = Color(0xFFE3E5EC)
 val SurfaceAmoled = Color(0xFF000000)
-val OnSurfaceAmoled = Color.White
-val SurfaceContainerLowestAmoled = Color(0xFF000000)
-val SurfaceContainerLowAmoled = Color(0xFF0A0A0A)
-val SurfaceContainerAmoled = Color(0xFF101010)
-val SurfaceContainerHighAmoled = Color(0xFF171717)
-val SurfaceContainerHighestAmoled = Color(0xFF1F1F1F)
-val SurfaceVariantAmoled = Color(0xFF141414)
-val OutlineVariantAmoled = Color(0xFF262626)
+val OnSurfaceAmoled = Color(0xFFE3E5EC)
+val OnSurfaceVariantAmoled = Color(0xFFB4BCC8)
+val SurfaceContainerLowestAmoled = Color(0xFF0B0C0F)
+val SurfaceContainerLowAmoled = Color(0xFF13151A)
+val SurfaceContainerAmoled = Color(0xFF1A1D24)
+val SurfaceContainerHighAmoled = Color(0xFF22262F)
+val SurfaceContainerHighestAmoled = Color(0xFF2B303B)
+val SurfaceVariantAmoled = Color(0xFF1E222A)
+val OutlineAmoled = Color(0xFF4E5564)
+val OutlineVariantAmoled = Color(0xFF343A46)
 
 // Light theme
 val PrimaryLight = Color(0xFF005FAF)

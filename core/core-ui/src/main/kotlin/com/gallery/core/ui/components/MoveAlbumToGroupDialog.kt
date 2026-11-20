@@ -1,5 +1,6 @@
 package com.gallery.core.ui.components
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,6 +34,8 @@ fun MoveAlbumToGroupDialog(
 
     AlertDialog(
         onDismissRequest = onDismissRequest,
+        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        tonalElevation = 6.dp,
         icon = {
             Icon(
                 imageVector = Icons.AutoMirrored.Outlined.DriveFileMove,
@@ -108,8 +111,9 @@ fun MoveAlbumToGroupDialog(
                                     .clip(RoundedCornerShape(8.dp))
                                     .clickable { onSelectGroup(group) },
                                 colors = CardDefaults.cardColors(
-                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
                                 ),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
                                 shape = RoundedCornerShape(8.dp)
                             ) {
                                 Row(

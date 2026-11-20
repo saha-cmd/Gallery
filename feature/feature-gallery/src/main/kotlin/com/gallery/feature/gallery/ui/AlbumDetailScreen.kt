@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.*
@@ -21,9 +22,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.MediaItem
@@ -31,6 +32,7 @@ import com.gallery.core.ui.components.AddToAlbumDialog
 import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.CreateAlbumDialog
 import com.gallery.core.ui.components.EmptyStateView
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.ui.components.MediaThumbnail
 import com.gallery.core.ui.components.MoveToAlbumDialog
 import com.gallery.core.ui.components.MoveToVaultAlbumDialog
@@ -61,11 +63,33 @@ fun AlbumDetailScreen(
     pendingMoveIntentSender: IntentSender? = null,
     onRetryMoveAfterPermission: () -> Unit = {},
     onClearPendingMoveIntent: () -> Unit = {},
+    pendingDeleteIntentSender: IntentSender? = null,
+    onConfirmDeleteIntent: () -> Unit = {},
+    onCancelDeleteIntent: () -> Unit = {},
+    onClearPendingDeleteIntent: () -> Unit = {},
+    showDirectTransferPermissionDialog: Boolean = false,
+    onDismissDirectTransferDialog: () -> Unit = {},
+    getSavedScrollPosition: (String) -> GridScrollPosition = { GridScrollPosition() },
+    onSaveScrollPosition: (String, Int, Int) -> Unit = { _, _, _ -> },
     columnCount: Int = 3,
     onColumnCountChanged: (Int) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scrollKey = "album_${album.id}"
+    val savedScroll = remember(album.id) { getSavedScrollPosition(scrollKey) }
+    val gridState = rememberViewportOnlyLazyGridState(
+        initialFirstVisibleItemIndex = savedScroll.index,
+        initialFirstVisibleItemScrollOffset = savedScroll.offset
+    )
+
+    // Safety net: if savedScroll.index > 0 and grid starts at 0 while items are available, scroll to saved
+    LaunchedEffect(album.items.isNotEmpty()) {
+        if (album.items.isNotEmpty() && savedScroll.index > 0 && gridState.firstVisibleItemIndex == 0) {
+            gridState.scrollToItem(savedScroll.index, savedScroll.offset)
+        }
+    }
+
     var selectedIds by remember { mutableStateOf(emptySet<Long>()) }
     var showMoveToVaultDialog by remember { mutableStateOf(false) }
     var showMoveToAlbumDialog by remember { mutableStateOf(false) }
@@ -90,6 +114,56 @@ fun AlbumDetailScreen(
     LaunchedEffect(pendingMoveIntentSender) {
         pendingMoveIntentSender?.let { sender ->
             movePermissionLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        }
+    }
+
+    val systemDeleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            onConfirmDeleteIntent()
+        } else {
+            onCancelDeleteIntent()
+        }
+    }
+
+    val manageFilesAccessLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (com.gallery.core.data.permissions.MediaPermissionManager.canModifyMediaSilently(context)) {
+            onDismissDirectTransferDialog()
+            onConfirmDeleteIntent()
+        }
+    }
+
+    if (showDirectTransferPermissionDialog) {
+        com.gallery.core.ui.components.DirectVaultTransferPermissionDialog(
+            onDismissRequest = {
+                onDismissDirectTransferDialog()
+                onCancelDeleteIntent()
+            },
+            onAllowDirectTransfer = {
+                onDismissDirectTransferDialog()
+                manageFilesAccessLauncher.launch(
+                    com.gallery.core.data.permissions.MediaPermissionManager.createManageAllFilesAccessIntent(context)
+                )
+            },
+            onContinueWithSystemPopup = {
+                onDismissDirectTransferDialog()
+                pendingDeleteIntentSender?.let { sender ->
+                    systemDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                    onClearPendingDeleteIntent()
+                }
+            }
+        )
+    }
+
+    LaunchedEffect(pendingDeleteIntentSender, showDirectTransferPermissionDialog) {
+        if (!showDirectTransferPermissionDialog) {
+            pendingDeleteIntentSender?.let { sender ->
+                systemDeleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                onClearPendingDeleteIntent()
+            }
         }
     }
 
@@ -125,17 +199,22 @@ fun AlbumDetailScreen(
     Scaffold(
         topBar = {
             if (isSelectionMode) {
+                var showSelectionMenu by remember { mutableStateOf(false) }
+
                 TopAppBar(
                     navigationIcon = {
                         IconButton(onClick = { selectedIds = emptySet() }) {
-                            Icon(Icons.Filled.Close, "Exit selection")
+                            Icon(Icons.Filled.Close, contentDescription = "Clear selection")
                         }
                     },
                     title = {
                         Text(
                             text = "${selectedIds.size} selected",
                             style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
                         )
                     },
                     actions = {
@@ -143,58 +222,95 @@ fun AlbumDetailScreen(
                             val allIds = album.items.map { it.id }.toSet()
                             selectedIds = if (selectedIds.containsAll(allIds)) emptySet() else allIds
                         }) {
-                            Icon(Icons.Outlined.SelectAll, "Select all")
-                        }
-                        // Batch Favorite action
-                        IconButton(onClick = {
-                            onToggleFavoritesForSelected(selectedItems)
-                            selectedIds = emptySet()
-                        }) {
-                            Icon(
-                                imageVector = Icons.Outlined.Favorite,
-                                contentDescription = "Favorite",
-                                tint = Color(0xFFFF3366)
-                            )
-                        }
-                        // Batch Add to Album action
-                        IconButton(onClick = { showAddToAlbumDialog = true }) {
-                            Icon(Icons.Outlined.DriveFolderUpload, "Add to Album")
-                        }
-                        // Batch Move to Album action
-                        IconButton(onClick = { showMoveToAlbumDialog = true }) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Outlined.DriveFileMove,
-                                contentDescription = "Move to Album"
-                            )
+                            Icon(Icons.Outlined.SelectAll, contentDescription = "Select all")
                         }
                         IconButton(onClick = ::shareSelected) {
-                            Icon(Icons.Outlined.Share, "Share")
-                        }
-                        IconButton(onClick = { showMoveToVaultDialog = true }) {
-                            Icon(Icons.Outlined.Lock, "Move to Secure Folder")
-                        }
-                        // If custom album, provide Remove from Album action
-                        if (album.isCustom) {
-                            IconButton(onClick = {
-                                onRemoveSelectedFromAlbum(album.id, selectedItems)
-                                selectedIds = emptySet()
-                            }) {
-                                Icon(
-                                    imageVector = Icons.Outlined.FolderDelete,
-                                    contentDescription = "Remove from Album",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            }
+                            Icon(Icons.Outlined.Share, contentDescription = "Share")
                         }
                         IconButton(onClick = {
                             onDeleteItemsToRecycleBin(selectedItems)
                             selectedIds = emptySet()
                         }) {
-                            Icon(Icons.Outlined.Delete, "Delete to Recycle Bin", tint = MaterialTheme.colorScheme.error)
+                            Icon(
+                                imageVector = Icons.Outlined.Delete,
+                                contentDescription = "Delete",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                        Box {
+                            IconButton(onClick = { showSelectionMenu = true }) {
+                                Icon(Icons.Outlined.MoreVert, contentDescription = "More options")
+                            }
+                            DropdownMenu(
+                                expanded = showSelectionMenu,
+                                onDismissRequest = { showSelectionMenu = false },
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Add to Favorites") },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.FavoriteBorder, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showSelectionMenu = false
+                                        onToggleFavoritesForSelected(selectedItems)
+                                        selectedIds = emptySet()
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Add to Album") },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.CreateNewFolder, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showSelectionMenu = false
+                                        showAddToAlbumDialog = true
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Move to Album") },
+                                    leadingIcon = {
+                                        Icon(Icons.AutoMirrored.Outlined.DriveFileMove, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showSelectionMenu = false
+                                        showMoveToAlbumDialog = true
+                                    }
+                                )
+                                if (album.isCustom) {
+                                    DropdownMenuItem(
+                                        text = { Text("Remove from Album") },
+                                        leadingIcon = {
+                                            Icon(
+                                                imageVector = Icons.Outlined.FolderDelete,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        },
+                                        onClick = {
+                                            showSelectionMenu = false
+                                            onRemoveSelectedFromAlbum(album.id, selectedItems)
+                                            selectedIds = emptySet()
+                                        }
+                                    )
+                                }
+                                DropdownMenuItem(
+                                    text = { Text("Move to Secure Folder") },
+                                    leadingIcon = {
+                                        Icon(Icons.Outlined.Lock, contentDescription = null)
+                                    },
+                                    onClick = {
+                                        showSelectionMenu = false
+                                        showMoveToVaultDialog = true
+                                    }
+                                )
+                            }
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        titleContentColor = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 )
             } else {
@@ -224,7 +340,12 @@ fun AlbumDetailScreen(
                                 IconButton(onClick = { showMenu = true }) {
                                     Icon(Icons.Outlined.MoreVert, contentDescription = "Album options")
                                 }
-                                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                                DropdownMenu(
+                                    expanded = showMenu,
+                                    onDismissRequest = { showMenu = false },
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                                ) {
                                     DropdownMenuItem(
                                         text = { Text("Add Items") },
                                         leadingIcon = { Icon(Icons.Outlined.Add, null) },
@@ -277,6 +398,12 @@ fun AlbumDetailScreen(
                     onColumnsChanged = onColumnCountChanged,
                     minColumns = 2,
                     maxColumns = 7,
+                    gridState = gridState,
+                    initialFirstVisibleItemIndex = savedScroll.index,
+                    initialFirstVisibleItemScrollOffset = savedScroll.offset,
+                    onScrollPositionChanged = { idx, off ->
+                        onSaveScrollPosition(scrollKey, idx, off)
+                    },
                     modifier = Modifier.fillMaxSize(),
                     overlayContent = { activeGridState, _ ->
                         VerticalFastScrollbar(
@@ -306,6 +433,7 @@ fun AlbumDetailScreen(
                                     if (isSelectionMode) {
                                         selectedIds = if (mediaItem.id in selectedIds) selectedIds - mediaItem.id else selectedIds + mediaItem.id
                                     } else {
+                                        onSaveScrollPosition(scrollKey, layerGridState.firstVisibleItemIndex, layerGridState.firstVisibleItemScrollOffset)
                                         onMediaClick(mediaItem.id, mediaItem is MediaItem.Video)
                                     }
                                 },
@@ -392,6 +520,8 @@ fun AlbumDetailScreen(
     if (showDeleteAlbumDialog) {
         AlertDialog(
             onDismissRequest = { showDeleteAlbumDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Delete Album?") },
             text = { Text("\"${album.name}\" will be deleted. Photos and videos in this album will NOT be deleted from your device.") },
@@ -424,7 +554,8 @@ fun AlbumDetailScreen(
         var sheetSelectedIds by remember { mutableStateOf(emptySet<Long>()) }
 
         ModalBottomSheet(
-            onDismissRequest = { showAddItemsSheet = false }
+            onDismissRequest = { showAddItemsSheet = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ) {
             Column(
                 modifier = Modifier

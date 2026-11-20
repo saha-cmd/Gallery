@@ -7,6 +7,7 @@ import android.media.MediaMetadataRetriever
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.gallery.core.domain.model.VaultItem
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.domain.repository.VaultRepository
 import com.gallery.core.domain.usecase.GetDefaultGridColumnsUseCase
 import com.gallery.core.domain.usecase.GetVaultItemsUseCase
@@ -56,12 +57,17 @@ data class VaultUiState(
     val error: String? = null,
     val infoMessage: String? = null,
     val previewFiles: Map<String, File> = emptyMap(),
+    val previewBytes: Map<String, ByteArray> = emptyMap(),
     val corruptedItemIds: Set<String> = emptySet(),
     val activeViewingItem: VaultItem? = null,
     val activeViewingFile: File? = null,
     val decryptedFiles: Map<String, File> = emptyMap(),
-    val isPreparingViewer: Boolean = false
-)
+    val isPreparingViewer: Boolean = false,
+    val selectedItemIds: Set<String> = emptySet()
+) {
+    val isSelectionMode: Boolean get() = selectedItemIds.isNotEmpty()
+    val selectedItems: List<VaultItem> get() = items.filter { it.id in selectedItemIds }
+}
 
 data class PinState(
     val pin: String = "",
@@ -82,8 +88,11 @@ class VaultViewModel @Inject constructor(
     private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase
 ) : AndroidViewModel(application) {
 
-    private val _authState = MutableStateFlow<VaultAuthState>(VaultAuthState.Idle)
-    val authState: StateFlow<VaultAuthState> = _authState.asStateFlow()
+    companion object {
+        private val _sessionAuthState = MutableStateFlow<VaultAuthState>(VaultAuthState.Idle)
+    }
+
+    val authState: StateFlow<VaultAuthState> = _sessionAuthState.asStateFlow()
 
     private val _vaultState = MutableStateFlow(VaultUiState())
     val vaultState: StateFlow<VaultUiState> = _vaultState.asStateFlow()
@@ -102,6 +111,7 @@ class VaultViewModel @Inject constructor(
 
     init {
         checkPinStatus()
+        loadVaultItems()
     }
 
     fun checkPinStatus() {
@@ -122,9 +132,9 @@ class VaultViewModel @Inject constructor(
 
     fun onBiometricResult(result: AuthResult) {
         when (result) {
-            is AuthResult.Success -> _authState.value = VaultAuthState.Authenticated
-            is AuthResult.FallbackToPIN -> _authState.value = VaultAuthState.PinEntry
-            is AuthResult.Error -> _authState.value = VaultAuthState.Error(result.message)
+            is AuthResult.Success -> _sessionAuthState.value = VaultAuthState.Authenticated
+            is AuthResult.FallbackToPIN -> _sessionAuthState.value = VaultAuthState.PinEntry
+            is AuthResult.Error -> _sessionAuthState.value = VaultAuthState.Error(result.message)
         }
     }
 
@@ -165,7 +175,7 @@ class VaultViewModel @Inject constructor(
                                 error = null
                             )
                         }
-                        _authState.value = VaultAuthState.Authenticated
+                        _sessionAuthState.value = VaultAuthState.Authenticated
                     } else {
                         _pinState.update {
                             it.copy(
@@ -181,7 +191,7 @@ class VaultViewModel @Inject constructor(
                 // Normal unlock
                 val correct = vaultRepository.verifyPin(enteredPin)
                 if (correct) {
-                    _authState.value = VaultAuthState.Authenticated
+                    _sessionAuthState.value = VaultAuthState.Authenticated
                 } else {
                     _pinState.update { it.copy(pin = "", error = "Incorrect PIN") }
                 }
@@ -218,16 +228,34 @@ class VaultViewModel @Inject constructor(
         }
     }
 
+    private val gridScrollPositions = java.util.concurrent.ConcurrentHashMap<String, GridScrollPosition>()
+
+    fun saveGridScrollPosition(key: String, index: Int, offset: Int) {
+        gridScrollPositions[key] = GridScrollPosition(index.coerceAtLeast(0), offset.coerceAtLeast(0))
+    }
+
+    fun getGridScrollPosition(key: String): GridScrollPosition {
+        return gridScrollPositions[key] ?: GridScrollPosition()
+    }
+
+    fun clearGridScrollPosition(key: String) {
+        gridScrollPositions.remove(key)
+    }
+
     fun selectTab(tab: VaultTab) {
-        _vaultState.update { it.copy(selectedTab = tab, selectedAlbumName = null) }
+        _vaultState.update { it.copy(selectedTab = tab, selectedAlbumName = null, selectedItemIds = emptySet()) }
     }
 
     fun openAlbum(albumName: String) {
-        _vaultState.update { it.copy(selectedAlbumName = albumName) }
+        _vaultState.update { it.copy(selectedAlbumName = albumName, selectedItemIds = emptySet()) }
     }
 
     fun closeAlbum() {
-        _vaultState.update { it.copy(selectedAlbumName = null) }
+        val albumName = _vaultState.value.selectedAlbumName
+        if (albumName != null) {
+            clearGridScrollPosition("vault_album_$albumName")
+        }
+        _vaultState.update { it.copy(selectedAlbumName = null, selectedItemIds = emptySet()) }
     }
 
     fun loadVaultItems() {
@@ -245,15 +273,70 @@ class VaultViewModel @Inject constructor(
                         }
                         .sortedByDescending { it.items.size }
 
-                    _vaultState.update { it.copy(items = items, albums = albums, isLoading = false) }
+                    val itemIds = items.map { it.id }.toSet()
+                    _vaultState.update { current ->
+                        current.copy(
+                            items = items,
+                            albums = albums,
+                            isLoading = false,
+                            selectedItemIds = current.selectedItemIds.filter { it in itemIds }.toSet()
+                        )
+                    }
                 }
         }
+    }
+
+    private val _isLaunchingEditor = MutableStateFlow(false)
+    val isLaunchingEditor: StateFlow<Boolean> = _isLaunchingEditor.asStateFlow()
+
+    fun setLaunchingEditor(launching: Boolean) {
+        _isLaunchingEditor.value = launching
+    }
+
+    fun purgeSecureTempFiles() {
+        try {
+            val cacheFolder = File(getApplication<Application>().cacheDir, "vault_secure_temp")
+            if (cacheFolder.exists()) {
+                val files = cacheFolder.listFiles()
+                files?.forEach { f ->
+                    if (f.name != ".nomedia") {
+                        try { f.delete() } catch (_: Exception) {}
+                    }
+                }
+                val nomedia = File(cacheFolder, ".nomedia")
+                if (!nomedia.exists()) nomedia.createNewFile()
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun onLeaveVaultScreen() {
+        purgeSecureTempFiles()
+        _sessionAuthState.value = VaultAuthState.Idle
+        _vaultState.update { it.copy(previewBytes = emptyMap(), decryptedFiles = emptyMap(), activeViewingItem = null, activeViewingFile = null, selectedItemIds = emptySet()) }
+    }
+
+    fun onAppBackgrounded() {
+        if (_isLaunchingEditor.value) {
+            return
+        }
+        _sessionAuthState.value = VaultAuthState.Idle
+        _vaultState.update {
+            it.copy(
+                previewBytes = emptyMap(),
+                previewFiles = emptyMap(),
+                decryptedFiles = emptyMap(),
+                activeViewingItem = null,
+                activeViewingFile = null,
+                selectedItemIds = emptySet()
+            )
+        }
+        purgeSecureTempFiles()
     }
 
     private val activePreviewJobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
 
     fun requestPreview(item: VaultItem) {
-        if (item.id in _vaultState.value.previewFiles ||
+        if (item.id in _vaultState.value.previewBytes ||
             item.id in _vaultState.value.corruptedItemIds ||
             activePreviewJobs.containsKey(item.id)) {
             return
@@ -262,91 +345,23 @@ class VaultViewModel @Inject constructor(
         val job = viewModelScope.launch(Dispatchers.IO) {
             val currentJob = coroutineContext[Job]
             try {
-                // 1. Check if pre-cached thumbnail file exists on disk (loaded on-demand by Coil's bounded LRU cache)
-                val cachedThumb = vaultRepository.getThumbnailFile(item)
-                if (cachedThumb != null && cachedThumb.exists() && cachedThumb.length() > 0) {
+                // 1. Fetch encrypted thumbnail directly decrypted in memory as ByteArray (zero disk exposure)
+                val thumbBytes = vaultRepository.getThumbnailBytes(item)
+                if (thumbBytes != null && thumbBytes.isNotEmpty()) {
                     if (isActive) {
                         _vaultState.update { current ->
                             current.copy(
-                                previewFiles = current.previewFiles + (item.id to cachedThumb)
+                                previewBytes = current.previewBytes + (item.id to thumbBytes)
                             )
                         }
                     }
                     return@launch
                 }
 
-                // 2. Decrypt to temp file and pre-cache thumbnail (160x160, RGB_565), recycling temp bitmap immediately
-                vaultRepository.getDecryptedTempFile(item).onSuccess { file ->
-                    if (!isActive) return@onSuccess
-                    val thumbDir = File(getApplication<Application>().filesDir, "vault/thumbnails").apply { mkdirs() }
-                    val thumbFile = File(thumbDir, "${item.id}.jpg")
-                    if (item.isVideo) {
-                        var retriever: MediaMetadataRetriever? = null
-                        var frame: Bitmap? = null
-                        try {
-                            retriever = MediaMetadataRetriever()
-                            retriever.setDataSource(file.absolutePath)
-                            frame = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O_MR1) {
-                                retriever.getScaledFrameAtTime(
-                                    1_000_000,
-                                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                                    160,
-                                    160
-                                ) ?: retriever.frameAtTime
-                            } else {
-                                retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                                    ?: retriever.frameAtTime
-                            }
-                            frame?.let {
-                                thumbFile.outputStream().use { out -> it.compress(Bitmap.CompressFormat.JPEG, 80, out) }
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("VaultViewModel", "Video frame extraction error", e)
-                        } finally {
-                            frame?.recycle()
-                            try {
-                                retriever?.release()
-                            } catch (_: Exception) {}
-                        }
-                    } else {
-                        var decoded: Bitmap? = null
-                        try {
-                            val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                            BitmapFactory.decodeFile(file.absolutePath, options)
-                            var sampleSize = 1
-                            if (options.outWidth > 0 && options.outHeight > 0) {
-                                while (options.outWidth / (sampleSize * 2) >= 160 && options.outHeight / (sampleSize * 2) >= 160) {
-                                    sampleSize *= 2
-                                }
-                            }
-                            val decodeOptions = BitmapFactory.Options().apply {
-                                inSampleSize = sampleSize
-                                inPreferredConfig = Bitmap.Config.RGB_565
-                            }
-                            decoded = BitmapFactory.decodeFile(file.absolutePath, decodeOptions)
-                            decoded?.let {
-                                thumbFile.outputStream().use { out -> it.compress(Bitmap.CompressFormat.JPEG, 80, out) }
-                            }
-                        } catch (e: Exception) {
-                            android.util.Log.e("VaultViewModel", "Photo decode error", e)
-                        } finally {
-                            decoded?.recycle()
-                        }
-                    }
-
-                    if (isActive) {
-                        _vaultState.update { current ->
-                            current.copy(
-                                previewFiles = current.previewFiles + (item.id to (if (thumbFile.exists()) thumbFile else file))
-                            )
-                        }
-                    }
-                }.onFailure { err ->
-                    if (isActive) {
-                        android.util.Log.e("VaultViewModel", "Decryption failed for item ${item.id}", err)
-                        _vaultState.update { current ->
-                            current.copy(corruptedItemIds = current.corruptedItemIds + item.id)
-                        }
+                // 2. If thumbnail bytes unavailable, mark corrupted or retry
+                if (isActive) {
+                    _vaultState.update { current ->
+                        current.copy(corruptedItemIds = current.corruptedItemIds + item.id)
                     }
                 }
             } finally {
@@ -363,16 +378,44 @@ class VaultViewModel @Inject constructor(
 
     fun releasePreview(itemId: String) {
         activePreviewJobs.remove(itemId)?.cancel()
-        if (itemId in _vaultState.value.previewFiles) {
-            _vaultState.update { current ->
-                current.copy(previewFiles = current.previewFiles - itemId)
-            }
+        _vaultState.update { current ->
+            current.copy(
+                previewBytes = current.previewBytes - itemId,
+                previewFiles = current.previewFiles - itemId
+            )
         }
+    }
+
+    fun toggleSelection(itemId: String) {
+        _vaultState.update { current ->
+            val updated = if (itemId in current.selectedItemIds) {
+                current.selectedItemIds - itemId
+            } else {
+                current.selectedItemIds + itemId
+            }
+            current.copy(selectedItemIds = updated)
+        }
+    }
+
+    fun selectAll(targetItems: List<VaultItem>) {
+        _vaultState.update { current ->
+            val targetIds = targetItems.map { it.id }.toSet()
+            val updated = if (current.selectedItemIds.containsAll(targetIds)) {
+                emptySet()
+            } else {
+                targetIds
+            }
+            current.copy(selectedItemIds = updated)
+        }
+    }
+
+    fun clearSelection() {
+        _vaultState.update { it.copy(selectedItemIds = emptySet()) }
     }
 
     fun openViewer(item: VaultItem, allItems: List<VaultItem> = _vaultState.value.items) {
         val currentIndex = allItems.indexOfFirst { it.id == item.id }.coerceAtLeast(0)
-        _vaultState.update { it.copy(activeViewingItem = item) }
+        _vaultState.update { it.copy(activeViewingItem = item, selectedItemIds = emptySet()) }
         prepareViewingFiles(allItems, currentIndex)
     }
 
@@ -428,7 +471,8 @@ class VaultViewModel @Inject constructor(
     }
 
     fun closeViewer() {
-        _vaultState.update { it.copy(activeViewingItem = null, activeViewingFile = null) }
+        _vaultState.update { it.copy(activeViewingItem = null, activeViewingFile = null, decryptedFiles = emptyMap()) }
+        purgeSecureTempFiles()
     }
 
     fun restoreItemToGallery(item: VaultItem) {
@@ -440,6 +484,7 @@ class VaultViewModel @Inject constructor(
                 _vaultState.update {
                     it.copy(
                         isLoading = false,
+                        previewBytes = it.previewBytes - item.id,
                         previewFiles = it.previewFiles - item.id,
                         decryptedFiles = it.decryptedFiles - item.id,
                         corruptedItemIds = it.corruptedItemIds - item.id,
@@ -500,6 +545,7 @@ class VaultViewModel @Inject constructor(
                     albums = updatedAlbums,
                     activeViewingItem = nextItem,
                     activeViewingFile = if (nextItem != null) it.decryptedFiles[nextItem.id] else null,
+                    previewBytes = it.previewBytes - item.id,
                     previewFiles = it.previewFiles - item.id,
                     decryptedFiles = it.decryptedFiles - item.id,
                     corruptedItemIds = it.corruptedItemIds - item.id,
@@ -512,6 +558,75 @@ class VaultViewModel @Inject constructor(
             }
 
             vaultRepository.removeFromVault(item)
+        }
+    }
+
+    fun restoreSelectedItems() {
+        val targets = _vaultState.value.selectedItems
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            _vaultState.update { it.copy(isLoading = true) }
+            var successCount = 0
+            val restoredIds = mutableSetOf<String>()
+            for (item in targets) {
+                val result = restoreFromVaultUseCase(item)
+                if (result.isSuccess) {
+                    successCount++
+                    restoredIds.add(item.id)
+                }
+            }
+            _vaultState.update { current ->
+                current.copy(
+                    isLoading = false,
+                    selectedItemIds = emptySet(),
+                    previewBytes = current.previewBytes - restoredIds,
+                    previewFiles = current.previewFiles - restoredIds,
+                    decryptedFiles = current.decryptedFiles - restoredIds,
+                    corruptedItemIds = current.corruptedItemIds - restoredIds,
+                    infoMessage = when {
+                        successCount == targets.size -> "$successCount item(s) taken out of Secure Folder and restored to Gallery"
+                        successCount > 0 -> "Restored $successCount of ${targets.size} item(s) to Gallery"
+                        else -> "Failed to restore selected items"
+                    }
+                )
+            }
+        }
+    }
+
+    fun removeSelectedFromVault() {
+        val targets = _vaultState.value.selectedItems
+        if (targets.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            _vaultState.update { it.copy(isLoading = true) }
+            val targetIds = targets.map { it.id }.toSet()
+            val updatedItems = _vaultState.value.items.filter { it.id !in targetIds }
+            val updatedAlbums = updatedItems.groupBy { it.albumName.ifBlank { "Default" } }
+                .map { (name, albumItems) ->
+                    VaultAlbum(
+                        name = name,
+                        items = albumItems,
+                        coverItem = albumItems.resolveFirstCoverItem()
+                    )
+                }
+                .sortedByDescending { it.items.size }
+
+            _vaultState.update { current ->
+                current.copy(
+                    isLoading = false,
+                    items = updatedItems,
+                    albums = updatedAlbums,
+                    selectedItemIds = emptySet(),
+                    previewBytes = current.previewBytes - targetIds,
+                    previewFiles = current.previewFiles - targetIds,
+                    decryptedFiles = current.decryptedFiles - targetIds,
+                    corruptedItemIds = current.corruptedItemIds - targetIds,
+                    infoMessage = "Removed ${targets.size} item(s) from Vault"
+                )
+            }
+
+            for (item in targets) {
+                vaultRepository.removeFromVault(item)
+            }
         }
     }
 
@@ -535,11 +650,6 @@ class VaultViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
-        try {
-            val cacheFolder = File(getApplication<Application>().cacheDir, "vault_secure_temp")
-            if (cacheFolder.exists()) {
-                cacheFolder.deleteRecursively()
-            }
-        } catch (_: Exception) {}
+        purgeSecureTempFiles()
     }
 }

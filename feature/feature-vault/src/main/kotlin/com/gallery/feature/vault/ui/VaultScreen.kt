@@ -12,9 +12,12 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -31,6 +34,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -46,10 +51,12 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntSize
@@ -58,8 +65,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.util.lerp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.gallery.core.ui.components.SleekVideoScrubber
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.gallery.core.ui.components.SleekVideoScrubber
+import com.gallery.feature.vault.viewmodel.VaultAuthState
 import androidx.media3.common.MediaItem as ExoMediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.Timeline
@@ -79,6 +90,7 @@ import coil.size.Scale
 import com.gallery.core.domain.model.VaultItem
 import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.EmptyStateView
+import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.ui.components.SwipeToDismissBox
 import com.gallery.core.ui.components.VaultInfoBottomSheet
 import com.gallery.core.ui.components.VerticalFastScrollbar
@@ -103,12 +115,42 @@ fun VaultScreen(
     viewModel: VaultViewModel = hiltViewModel()
 ) {
     val vaultState by viewModel.vaultState.collectAsStateWithLifecycle()
+    val authState by viewModel.authState.collectAsStateWithLifecycle()
     val gridColumns by viewModel.gridColumns.collectAsStateWithLifecycle()
     val view = LocalView.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     var itemToDelete by remember { mutableStateOf<VaultItem?>(null) }
+    var showBatchDeleteDialog by remember { mutableStateOf(false) }
     var showVaultMenu by remember { mutableStateOf(false) }
     var showChangePinDialog by remember { mutableStateOf(false) }
     var showBiometricInfoDialog by remember { mutableStateOf(false) }
+
+    // Auto-lock vault on background or when auth state resets to idle/unauthenticated
+    LaunchedEffect(authState) {
+        if (authState !is VaultAuthState.Authenticated) {
+            onBack()
+        }
+    }
+
+    // App background lifecycle observer: auto-lock and purge decrypted temp/memory caches on ON_STOP
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                viewModel.onAppBackgrounded()
+            } else if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.setLaunchingEditor(false)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    // Intercept Back button when multi-item selection mode is active
+    BackHandler(enabled = vaultState.isSelectionMode && vaultState.activeViewingItem == null) {
+        viewModel.clearSelection()
+    }
 
     // Intercept Back button when full-screen viewer is open
     BackHandler(enabled = vaultState.activeViewingItem != null) {
@@ -120,83 +162,136 @@ fun VaultScreen(
         viewModel.closeAlbum()
     }
 
-    // Block screenshots and screen recording inside Vault
+    // Block screenshots, screen recording and task snapshots inside Vault
     DisposableEffect(Unit) {
         val window = (view.context as? android.app.Activity)?.window
         window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
         viewModel.loadVaultItems()
         onDispose {
             window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            viewModel.onLeaveVaultScreen()
         }
     }
 
     val isViewingItem = vaultState.activeViewingItem != null
+    val inAlbum = vaultState.selectedAlbumName != null
+    val displayedItems = if (inAlbum) {
+        vaultState.items.filter { it.albumName == vaultState.selectedAlbumName }
+    } else {
+        vaultState.items
+    }
 
     Scaffold(
         topBar = {
             if (!isViewingItem) {
-                val inAlbum = vaultState.selectedAlbumName != null
-                val albumItems = if (inAlbum) {
-                    vaultState.items.filter { it.albumName == vaultState.selectedAlbumName }
-                } else {
-                    vaultState.items
-                }
-                TopAppBar(
-                    title = {
-                        Column {
+                if (vaultState.isSelectionMode) {
+                    TopAppBar(
+                        title = {
                             Text(
-                                text = if (inAlbum) vaultState.selectedAlbumName!! else "Secure Vault",
-                                fontWeight = FontWeight.SemiBold
+                                text = "${vaultState.selectedItemIds.size} selected",
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 1
                             )
-                            Text(
-                                text = if (inAlbum) "${albumItems.size} items" else "${vaultState.items.size} hidden items",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = if (inAlbum) viewModel::closeAlbum else onBack) {
-                            Icon(Icons.AutoMirrored.Outlined.ArrowBack, if (inAlbum) "Back to Vault" else "Back")
-                        }
-                    },
-                    actions = {
-                        Box {
-                            IconButton(onClick = { showVaultMenu = true }) {
-                                Icon(Icons.Outlined.MoreVert, "Options")
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = viewModel::clearSelection) {
+                                Icon(Icons.Filled.Close, "Exit selection")
                             }
-                            DropdownMenu(expanded = showVaultMenu, onDismissRequest = { showVaultMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Change PIN") },
-                                    leadingIcon = { Icon(Icons.Outlined.Pin, null) },
-                                    onClick = {
-                                        showVaultMenu = false
-                                        showChangePinDialog = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Fingerprint Info") },
-                                    leadingIcon = { Icon(Icons.Outlined.Fingerprint, null) },
-                                    onClick = {
-                                        showVaultMenu = false
-                                        showBiometricInfoDialog = true
-                                    }
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Clear Corrupted Items") },
-                                    leadingIcon = { Icon(Icons.Outlined.CleaningServices, null) },
-                                    onClick = {
-                                        showVaultMenu = false
-                                        viewModel.clearCorruptedItems()
-                                    }
+                        },
+                        actions = {
+                            IconButton(onClick = { viewModel.selectAll(displayedItems) }) {
+                                Icon(
+                                    imageVector = Icons.Outlined.SelectAll,
+                                    contentDescription = "Select all"
                                 )
                             }
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface
+                            IconButton(
+                                onClick = viewModel::restoreSelectedItems,
+                                enabled = vaultState.selectedItemIds.isNotEmpty()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.LockOpen,
+                                    contentDescription = "Take Out of Secure Folder"
+                                )
+                            }
+                            IconButton(
+                                onClick = { showBatchDeleteDialog = true },
+                                enabled = vaultState.selectedItemIds.isNotEmpty()
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Delete,
+                                    contentDescription = "Delete permanently",
+                                    tint = MaterialTheme.colorScheme.error
+                                )
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
                     )
-                )
+                } else {
+                    TopAppBar(
+                        title = {
+                            Column {
+                                Text(
+                                    text = if (inAlbum) vaultState.selectedAlbumName!! else "Secure Vault",
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (inAlbum) "${displayedItems.size} items" else "${vaultState.items.size} hidden items",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        },
+                        navigationIcon = {
+                            IconButton(onClick = if (inAlbum) viewModel::closeAlbum else onBack) {
+                                Icon(Icons.AutoMirrored.Outlined.ArrowBack, if (inAlbum) "Back to Vault" else "Back")
+                            }
+                        },
+                        actions = {
+                            Box {
+                                IconButton(onClick = { showVaultMenu = true }) {
+                                    Icon(Icons.Outlined.MoreVert, "Options")
+                                }
+                                DropdownMenu(
+                                    expanded = showVaultMenu,
+                                    onDismissRequest = { showVaultMenu = false },
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Change PIN") },
+                                        leadingIcon = { Icon(Icons.Outlined.Pin, null) },
+                                        onClick = {
+                                            showVaultMenu = false
+                                            showChangePinDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Fingerprint Info") },
+                                        leadingIcon = { Icon(Icons.Outlined.Fingerprint, null) },
+                                        onClick = {
+                                            showVaultMenu = false
+                                            showBiometricInfoDialog = true
+                                        }
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Clear Corrupted Items") },
+                                        leadingIcon = { Icon(Icons.Outlined.CleaningServices, null) },
+                                        onClick = {
+                                            showVaultMenu = false
+                                            viewModel.clearCorruptedItems()
+                                        }
+                                    )
+                                }
+                            }
+                        },
+                        colors = TopAppBarDefaults.topAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surface
+                        )
+                    )
+                }
             }
         }
     ) { paddingValues ->
@@ -205,12 +300,6 @@ fun VaultScreen(
                 .fillMaxSize()
                 .then(if (!isViewingItem) Modifier.padding(paddingValues) else Modifier)
         ) {
-            val inAlbum = vaultState.selectedAlbumName != null
-            val displayedItems = if (inAlbum) {
-                vaultState.items.filter { it.albumName == vaultState.selectedAlbumName }
-            } else {
-                vaultState.items
-            }
 
             when {
                 vaultState.isLoading && vaultState.items.isEmpty() -> {
@@ -233,12 +322,31 @@ fun VaultScreen(
                             subtitle = "No items in ${vaultState.selectedAlbumName}"
                         )
                     } else {
+                        val albumKey = "vault_album_${vaultState.selectedAlbumName}"
+                        val savedScroll = remember(albumKey) { viewModel.getGridScrollPosition(albumKey) }
+                        val inAlbumGridState = rememberViewportOnlyLazyGridState(
+                            initialFirstVisibleItemIndex = savedScroll.index,
+                            initialFirstVisibleItemScrollOffset = savedScroll.offset
+                        )
+
+                        LaunchedEffect(displayedItems.isNotEmpty()) {
+                            if (displayedItems.isNotEmpty() && savedScroll.index > 0 && inAlbumGridState.firstVisibleItemIndex == 0) {
+                                inAlbumGridState.scrollToItem(savedScroll.index, savedScroll.offset)
+                            }
+                        }
+
                         val inAlbumPreviewRefs = remember { mutableMapOf<String, Int>() }
                         AnimatedPinchGridContainer(
                             currentColumns = gridColumns,
                             onColumnsChanged = viewModel::setGridColumns,
                             minColumns = 2,
                             maxColumns = 7,
+                            gridState = inAlbumGridState,
+                            initialFirstVisibleItemIndex = savedScroll.index,
+                            initialFirstVisibleItemScrollOffset = savedScroll.offset,
+                            onScrollPositionChanged = { idx, off ->
+                                viewModel.saveGridScrollPosition(albumKey, idx, off)
+                            },
                             modifier = Modifier.fillMaxSize(),
                             overlayContent = { activeGridState, _ ->
                                 VerticalFastScrollbar(
@@ -262,18 +370,32 @@ fun VaultScreen(
                                 modifier = Modifier.fillMaxSize()
                             ) {
                                 items(displayedItems, key = { it.id }) { vaultItem ->
+                                    val isSelected = vaultItem.id in vaultState.selectedItemIds
                                     VaultThumbnailCard(
                                         item = vaultItem,
                                         previewFile = vaultState.previewFiles[vaultItem.id],
+                                        previewBytes = vaultState.previewBytes[vaultItem.id],
                                         isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
                                         isScrolling = effectiveScrolling,
                                         isPreviewLayer = isPreviewLayer,
                                         activeRefCounts = inAlbumPreviewRefs,
                                         targetSize = targetSize,
                                         aspectRatio = tileAspectRatio,
+                                        isSelectionMode = vaultState.isSelectionMode,
+                                        isSelected = isSelected,
                                         onRequestPreview = { viewModel.requestPreview(vaultItem) },
                                         onReleasePreview = { viewModel.releasePreview(vaultItem.id) },
-                                        onClick = { viewModel.openViewer(vaultItem, displayedItems) },
+                                        onClick = {
+                                            if (vaultState.isSelectionMode) {
+                                                viewModel.toggleSelection(vaultItem.id)
+                                            } else {
+                                                viewModel.saveGridScrollPosition(albumKey, layerGridState.firstVisibleItemIndex, layerGridState.firstVisibleItemScrollOffset)
+                                                viewModel.openViewer(vaultItem, displayedItems)
+                                            }
+                                        },
+                                        onLongClick = {
+                                            viewModel.toggleSelection(vaultItem.id)
+                                        },
                                         onRestore = { viewModel.restoreItemToGallery(vaultItem) },
                                         onDelete = { itemToDelete = vaultItem }
                                     )
@@ -304,12 +426,30 @@ fun VaultScreen(
 
                         when (vaultState.selectedTab) {
                             VaultTab.ALL_MEDIA -> {
+                                val savedScroll = remember { viewModel.getGridScrollPosition("vault_all") }
+                                val allMediaGridState = rememberViewportOnlyLazyGridState(
+                                    initialFirstVisibleItemIndex = savedScroll.index,
+                                    initialFirstVisibleItemScrollOffset = savedScroll.offset
+                                )
+
+                                LaunchedEffect(vaultState.items.isNotEmpty()) {
+                                    if (vaultState.items.isNotEmpty() && savedScroll.index > 0 && allMediaGridState.firstVisibleItemIndex == 0) {
+                                        allMediaGridState.scrollToItem(savedScroll.index, savedScroll.offset)
+                                    }
+                                }
+
                                 val allMediaPreviewRefs = remember { mutableMapOf<String, Int>() }
                                 AnimatedPinchGridContainer(
                                     currentColumns = gridColumns,
                                     onColumnsChanged = viewModel::setGridColumns,
                                     minColumns = 2,
                                     maxColumns = 7,
+                                    gridState = allMediaGridState,
+                                    initialFirstVisibleItemIndex = savedScroll.index,
+                                    initialFirstVisibleItemScrollOffset = savedScroll.offset,
+                                    onScrollPositionChanged = { idx, off ->
+                                        viewModel.saveGridScrollPosition("vault_all", idx, off)
+                                    },
                                     modifier = Modifier.fillMaxSize(),
                                     overlayContent = { activeGridState, _ ->
                                         VerticalFastScrollbar(
@@ -333,18 +473,32 @@ fun VaultScreen(
                                         modifier = Modifier.fillMaxSize()
                                     ) {
                                         items(vaultState.items, key = { it.id }) { vaultItem ->
+                                            val isSelected = vaultItem.id in vaultState.selectedItemIds
                                             VaultThumbnailCard(
                                                 item = vaultItem,
                                                 previewFile = vaultState.previewFiles[vaultItem.id],
+                                                previewBytes = vaultState.previewBytes[vaultItem.id],
                                                 isCorrupted = vaultState.corruptedItemIds.contains(vaultItem.id),
                                                 isScrolling = effectiveScrolling,
                                                 isPreviewLayer = isPreviewLayer,
                                                 activeRefCounts = allMediaPreviewRefs,
                                                 targetSize = targetSize,
                                                 aspectRatio = tileAspectRatio,
+                                                isSelectionMode = vaultState.isSelectionMode,
+                                                isSelected = isSelected,
                                                 onRequestPreview = { viewModel.requestPreview(vaultItem) },
                                                 onReleasePreview = { viewModel.releasePreview(vaultItem.id) },
-                                                onClick = { viewModel.openViewer(vaultItem, vaultState.items) },
+                                                onClick = {
+                                                    if (vaultState.isSelectionMode) {
+                                                        viewModel.toggleSelection(vaultItem.id)
+                                                    } else {
+                                                        viewModel.saveGridScrollPosition("vault_all", layerGridState.firstVisibleItemIndex, layerGridState.firstVisibleItemScrollOffset)
+                                                        viewModel.openViewer(vaultItem, vaultState.items)
+                                                    }
+                                                },
+                                                onLongClick = {
+                                                    viewModel.toggleSelection(vaultItem.id)
+                                                },
                                                 onRestore = { viewModel.restoreItemToGallery(vaultItem) },
                                                 onDelete = { itemToDelete = vaultItem }
                                             )
@@ -360,7 +514,32 @@ fun VaultScreen(
                                         subtitle = "Move photos and videos to Secure Folder albums from the gallery"
                                     )
                                 } else {
-                                    val albumsGridState = rememberViewportOnlyLazyGridState()
+                                    val savedScroll = remember { viewModel.getGridScrollPosition("vault_albums") }
+                                    val albumsGridState = rememberViewportOnlyLazyGridState(
+                                        initialFirstVisibleItemIndex = savedScroll.index,
+                                        initialFirstVisibleItemScrollOffset = savedScroll.offset
+                                    )
+
+                                    LaunchedEffect(vaultState.albums.isNotEmpty()) {
+                                        if (vaultState.albums.isNotEmpty() && savedScroll.index > 0 && albumsGridState.firstVisibleItemIndex == 0) {
+                                            albumsGridState.scrollToItem(savedScroll.index, savedScroll.offset)
+                                        }
+                                    }
+
+                                    LaunchedEffect(albumsGridState) {
+                                        snapshotFlow {
+                                            Triple(
+                                                albumsGridState.firstVisibleItemIndex,
+                                                albumsGridState.firstVisibleItemScrollOffset,
+                                                albumsGridState.isScrollInProgress
+                                            )
+                                        }.collect { (idx, off, isScrolling) ->
+                                            if (isScrolling || idx > 0 || off > 0) {
+                                                viewModel.saveGridScrollPosition("vault_albums", idx, off)
+                                            }
+                                        }
+                                    }
+
                                     val isAlbumsScrolling by remember { derivedStateOf { albumsGridState.isScrollInProgress } }
                                     Box(modifier = Modifier.fillMaxSize()) {
                                         LazyVerticalGrid(
@@ -375,10 +554,14 @@ fun VaultScreen(
                                                 VaultAlbumCard(
                                                     album = album,
                                                     coverFile = album.coverItem?.let { vaultState.previewFiles[it.id] },
+                                                    coverBytes = album.coverItem?.let { vaultState.previewBytes[it.id] },
                                                     isScrolling = isAlbumsScrolling,
                                                     onRequestPreview = { viewModel.requestPreview(it) },
                                                     onReleasePreview = { viewModel.releasePreview(it.id) },
-                                                    onClick = { viewModel.openAlbum(album.name) }
+                                                    onClick = {
+                                                        viewModel.saveGridScrollPosition("vault_albums", albumsGridState.firstVisibleItemIndex, albumsGridState.firstVisibleItemScrollOffset)
+                                                        viewModel.openAlbum(album.name)
+                                                    }
                                                 )
                                             }
                                         }
@@ -405,6 +588,7 @@ fun VaultScreen(
                     onClose = viewModel::closeViewer,
                     onRestore = { item -> viewModel.restoreItemToGallery(item) },
                     onEdit = { file ->
+                        viewModel.setLaunchingEditor(true)
                         onEditItem(Uri.fromFile(file).toString())
                     },
                     onDelete = { item -> itemToDelete = item }
@@ -429,6 +613,8 @@ fun VaultScreen(
     itemToDelete?.let { item ->
         AlertDialog(
             onDismissRequest = { itemToDelete = null },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
             title = { Text("Delete permanently?") },
             text = { Text("\"${item.originalName}\" will be permanently deleted from the vault.") },
@@ -451,6 +637,35 @@ fun VaultScreen(
         )
     }
 
+    // Batch delete confirmation dialog
+    if (showBatchDeleteDialog) {
+        val count = vaultState.selectedItemIds.size
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
+            icon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+            title = { Text("Delete permanently?") },
+            text = { Text("$count item(s) will be permanently deleted from the vault.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showBatchDeleteDialog = false
+                        viewModel.removeSelectedFromVault()
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDeleteDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     if (showChangePinDialog) {
         var currentPin by remember { mutableStateOf("") }
         var newPin by remember { mutableStateOf("") }
@@ -459,6 +674,8 @@ fun VaultScreen(
 
         AlertDialog(
             onDismissRequest = { showChangePinDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.Pin, null) },
             title = { Text("Change Secure PIN") },
             text = {
@@ -528,6 +745,8 @@ fun VaultScreen(
         val isBioAvail = viewModel.biometricAuthManager.isBiometricAvailable()
         AlertDialog(
             onDismissRequest = { showBiometricInfoDialog = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            tonalElevation = 6.dp,
             icon = { Icon(Icons.Outlined.Fingerprint, null, tint = MaterialTheme.colorScheme.primary) },
             title = { Text("Fingerprint Unlock") },
             text = {
@@ -550,7 +769,8 @@ fun VaultScreen(
 @Composable
 private fun VaultAlbumCard(
     album: VaultAlbum,
-    coverFile: File?,
+    coverFile: File? = null,
+    coverBytes: ByteArray? = null,
     onClick: () -> Unit,
     isScrolling: Boolean = false,
     onRequestPreview: (VaultItem) -> Unit = {},
@@ -580,8 +800,8 @@ private fun VaultAlbumCard(
             }
         }
     }
-    LaunchedEffect(coverItem?.id, shouldLoad, coverFile) {
-        if (shouldLoad && coverItem != null && coverFile == null) {
+    LaunchedEffect(coverItem?.id, shouldLoad, coverBytes, coverFile) {
+        if (shouldLoad && coverItem != null && coverBytes == null && coverFile == null) {
             onRequestPreview(coverItem)
         }
     }
@@ -602,10 +822,10 @@ private fun VaultAlbumCard(
                     .background(MaterialTheme.colorScheme.surfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
-                if (shouldLoad && coverFile != null && coverFile.exists()) {
-                    val thumbRequest = remember(coverFile.absolutePath, cacheKey) {
+                if (shouldLoad && ((coverBytes != null && coverBytes.isNotEmpty()) || (coverFile != null && coverFile.exists()))) {
+                    val thumbRequest = remember(coverBytes, coverFile?.absolutePath, cacheKey) {
                         ImageRequest.Builder(context)
-                            .data(coverFile)
+                            .data(coverBytes ?: coverFile)
                             .size(180, 180)
                             .precision(Precision.INEXACT)
                             .scale(Scale.FILL)
@@ -615,7 +835,7 @@ private fun VaultAlbumCard(
                             .diskCacheKey(cacheKey)
                             .crossfade(false)
                             .memoryCachePolicy(CachePolicy.ENABLED)
-                            .diskCachePolicy(CachePolicy.ENABLED)
+                            .diskCachePolicy(CachePolicy.DISABLED)
                             .build()
                     }
                     AsyncImage(
@@ -650,10 +870,12 @@ private fun VaultAlbumCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun VaultThumbnailCard(
     item: VaultItem,
-    previewFile: File?,
+    previewFile: File? = null,
+    previewBytes: ByteArray? = null,
     isCorrupted: Boolean,
     onClick: () -> Unit,
     onRestore: () -> Unit,
@@ -663,6 +885,9 @@ private fun VaultThumbnailCard(
     activeRefCounts: MutableMap<String, Int>? = null,
     targetSize: Int = 150,
     aspectRatio: Float = 1f,
+    isSelectionMode: Boolean = false,
+    isSelected: Boolean = false,
+    onLongClick: () -> Unit = {},
     onRequestPreview: () -> Unit = {},
     onReleasePreview: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -670,6 +895,7 @@ private fun VaultThumbnailCard(
     var showMenu by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val haptic = LocalHapticFeedback.current
     val cacheKey = "vault_thumb_${item.id}"
     val imageLoader = context.imageLoader
     val isInMemoryCache = imageLoader.memoryCache?.get(MemoryCache.Key(cacheKey)) != null
@@ -701,8 +927,8 @@ private fun VaultThumbnailCard(
             }
         }
     }
-    LaunchedEffect(item.id, shouldLoad, previewFile) {
-        if (shouldLoad && previewFile == null) {
+    LaunchedEffect(item.id, shouldLoad, previewBytes, previewFile) {
+        if (shouldLoad && previewBytes == null && previewFile == null) {
             onRequestPreview()
         }
     }
@@ -711,14 +937,20 @@ private fun VaultThumbnailCard(
         modifier = modifier
             .aspectRatio(aspectRatio)
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-            .clickable(onClick = onClick)
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = {
+                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                    onLongClick()
+                }
+            )
     ) {
         if (shouldLoad) {
-            if (previewFile != null && previewFile.exists()) {
+            if ((previewBytes != null && previewBytes.isNotEmpty()) || (previewFile != null && previewFile.exists())) {
                 val decodeSize = if (isPreviewLayer) 110 else targetSize
-                val thumbRequest = remember(previewFile.absolutePath, item.id, decodeSize) {
+                val thumbRequest = remember(previewBytes, previewFile?.absolutePath, item.id, decodeSize) {
                     ImageRequest.Builder(context)
-                        .data(previewFile)
+                        .data(previewBytes ?: previewFile)
                         .size(decodeSize, decodeSize)
                         .precision(Precision.INEXACT)
                         .scale(Scale.FILL)
@@ -729,7 +961,7 @@ private fun VaultThumbnailCard(
                         .placeholderMemoryCacheKey(cacheKey)
                         .crossfade(false)
                         .memoryCachePolicy(CachePolicy.ENABLED)
-                        .diskCachePolicy(CachePolicy.ENABLED)
+                        .diskCachePolicy(CachePolicy.DISABLED)
                         .build()
                 }
                 AsyncImage(
@@ -785,6 +1017,49 @@ private fun VaultThumbnailCard(
             }
         }
 
+        // Dim / tint overlay when selected
+        if (isSelectionMode && isSelected) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.32f))
+            )
+        }
+
+        // Selection mode checkbox indicator (top-end)
+        if (isSelectionMode) {
+            val checkSize = 22.dp
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+            ) {
+                if (isSelected) {
+                    Box(
+                        modifier = Modifier
+                            .size(checkSize)
+                            .background(MaterialTheme.colorScheme.primary, CircleShape)
+                            .border(1.5.dp, Color.White, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = "Selected",
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                    }
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(checkSize)
+                            .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                            .border(1.5.dp, Color.White.copy(alpha = 0.9f), CircleShape)
+                    )
+                }
+            }
+        }
+
         // Video badge
         if (item.isVideo) {
             Box(
@@ -807,43 +1082,50 @@ private fun VaultThumbnailCard(
             }
         }
 
-        // More options dropdown
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .padding(2.dp)
-        ) {
-            IconButton(
-                onClick = { showMenu = true },
-                modifier = Modifier.size(28.dp)
+        // More options dropdown (hidden during selection mode so tapping toggles selection)
+        if (!isSelectionMode) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(2.dp)
             ) {
-                Icon(
-                    imageVector = Icons.Outlined.MoreVert,
-                    contentDescription = "Options",
-                    tint = Color.White,
-                    modifier = Modifier
-                        .size(18.dp)
-                        .background(Color.Black.copy(alpha = 0.45f), CircleShape)
-                        .padding(2.dp)
-                )
-            }
-            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                DropdownMenuItem(
-                    text = { Text("Take Out of Secure Folder") },
-                    leadingIcon = { Icon(Icons.Outlined.LockOpen, null) },
-                    onClick = {
-                        showMenu = false
-                        onRestore()
-                    }
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete permanently") },
-                    leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
-                    onClick = {
-                        showMenu = false
-                        onDelete()
-                    }
-                )
+                IconButton(
+                    onClick = { showMenu = true },
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.MoreVert,
+                        contentDescription = "Options",
+                        tint = Color.White,
+                        modifier = Modifier
+                            .size(18.dp)
+                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                            .padding(2.dp)
+                    )
+                }
+                DropdownMenu(
+                    expanded = showMenu,
+                    onDismissRequest = { showMenu = false },
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Take Out of Secure Folder") },
+                        leadingIcon = { Icon(Icons.Outlined.LockOpen, null) },
+                        onClick = {
+                            showMenu = false
+                            onRestore()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete permanently") },
+                        leadingIcon = { Icon(Icons.Outlined.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                        onClick = {
+                            showMenu = false
+                            onDelete()
+                        }
+                    )
+                }
             }
         }
     }
@@ -1271,7 +1553,7 @@ private fun VaultZoomablePhoto(
                 .diskCacheKey("orig_vault_${item.id}")
                 .crossfade(200)
                 .memoryCachePolicy(CachePolicy.DISABLED)
-                .diskCachePolicy(CachePolicy.ENABLED)
+                .diskCachePolicy(CachePolicy.DISABLED)
                 .build()
         }
 
