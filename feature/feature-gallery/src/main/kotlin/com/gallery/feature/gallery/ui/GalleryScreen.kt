@@ -61,6 +61,7 @@ import com.gallery.core.ui.components.AnimatedPinchGridContainer
 import com.gallery.core.ui.components.AppUpdateDialog
 import com.gallery.core.ui.components.ChangeAlbumCoverDialog
 import com.gallery.core.ui.components.CreateAlbumDialog
+import com.gallery.core.ui.components.DuplicateAnalyzerSheet
 import com.gallery.core.ui.components.EditGroupAlbumsDialog
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.GridScrollPosition
@@ -97,6 +98,7 @@ fun GalleryScreen(
     val isGroupedView by viewModel.isGroupedView.collectAsStateWithLifecycle()
     val collapsedGroups by viewModel.collapsedGroups.collectAsStateWithLifecycle()
     val updateState by viewModel.updateState.collectAsStateWithLifecycle()
+    val duplicateScanState by viewModel.duplicateScanState.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -137,6 +139,7 @@ fun GalleryScreen(
     var groupToRename by remember { mutableStateOf<UserAlbumGroupUiModel?>(null) }
     var groupToDissolve by remember { mutableStateOf<UserAlbumGroupUiModel?>(null) }
     var isRecycleBinOpen by remember { mutableStateOf(false) }
+    var showDuplicateAnalyzerSheet by remember { mutableStateOf(false) }
 
     // Clear album selection when leaving Albums tab
     LaunchedEffect(pagerState.currentPage) {
@@ -274,6 +277,24 @@ fun GalleryScreen(
         }
     }
 
+    val renamePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.retryPendingDuplicateRename()
+        } else {
+            viewModel.clearPendingDuplicateRename()
+        }
+    }
+
+    LaunchedEffect(duplicateScanState.pendingRenameIntentSender) {
+        duplicateScanState.pendingRenameIntentSender?.let { sender ->
+            renamePermissionLauncher.launch(
+                androidx.activity.result.IntentSenderRequest.Builder(sender).build()
+            )
+        }
+    }
+
     // Permission launcher
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -382,6 +403,10 @@ fun GalleryScreen(
                     onGroupAlbumsClick = {
                         preselectedAlbumKeysForGroup = emptySet()
                         showGroupAlbumsDialog = true
+                    },
+                    onFindDuplicatesClick = {
+                        viewModel.startDuplicateScan()
+                        showDuplicateAnalyzerSheet = true
                     }
                 )
             }
@@ -908,6 +933,26 @@ fun GalleryScreen(
         onRemindLater = { viewModel.remindMeLaterUpdate() },
         onRetry = { viewModel.checkForStartupUpdates() }
     )
+
+    if (showDuplicateAnalyzerSheet) {
+        DuplicateAnalyzerSheet(
+            isScanning = duplicateScanState.isScanning,
+            scannedCount = duplicateScanState.scannedCount,
+            totalCount = duplicateScanState.totalCount,
+            result = duplicateScanState.result,
+            onDismiss = { showDuplicateAnalyzerSheet = false },
+            onDeleteItem = { item -> viewModel.deleteDuplicateGalleryItem(item) },
+            onDeleteAllDuplicatesInGroup = { group -> viewModel.deleteAllDuplicatesInGalleryGroup(group) },
+            onRenameItem = { item, newName -> viewModel.renameDuplicateGalleryItem(item, newName) },
+            thumbnail = { item, modifier ->
+                MediaThumbnail(
+                    item = item,
+                    onClick = {},
+                    modifier = modifier
+                )
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -920,7 +965,8 @@ private fun GalleryTopBar(
     onSettingsClick: () -> Unit,
     onCreateAlbumClick: () -> Unit,
     onToggleGroupedView: () -> Unit,
-    onGroupAlbumsClick: () -> Unit
+    onGroupAlbumsClick: () -> Unit,
+    onFindDuplicatesClick: () -> Unit
 ) {
     var showMenu by remember { mutableStateOf(false) }
 
@@ -958,6 +1004,14 @@ private fun GalleryTopBar(
                             }
                         )
                     }
+                    DropdownMenuItem(
+                        text = { Text("Find Duplicates") },
+                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                        onClick = {
+                            showMenu = false
+                            onFindDuplicatesClick()
+                        }
+                    )
                     DropdownMenuItem(
                         text = { Text("Recycle Bin") },
                         leadingIcon = { Icon(Icons.Outlined.AutoDelete, null) },

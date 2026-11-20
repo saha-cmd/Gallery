@@ -12,9 +12,14 @@ import com.gallery.core.data.repository.MediaRepositoryImpl
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.AppUpdateInfo
 import com.gallery.core.domain.model.AppUpdateState
+import com.gallery.core.domain.model.DuplicateAnalysisResult
+import com.gallery.core.domain.model.DuplicateCandidate
+import com.gallery.core.domain.model.DuplicateGroup
+import com.gallery.core.domain.model.DuplicateGroupType
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.domain.model.MoveAlbumResult
 import com.gallery.core.domain.model.PendingVaultItem
+import com.gallery.core.domain.model.RenameMediaResult
 import com.gallery.core.domain.model.StagedVaultItem
 import com.gallery.core.domain.model.UserAlbumGroup
 import com.gallery.core.domain.model.VaultMoveRequest
@@ -26,6 +31,7 @@ import com.gallery.core.domain.repository.MediaRepository
 import com.gallery.core.domain.usecase.AddAlbumsToUserGroupUseCase
 import com.gallery.core.domain.usecase.AddItemsToCustomAlbumUseCase
 import com.gallery.core.domain.usecase.AddToVaultUseCase
+import com.gallery.core.domain.usecase.AnalyzeDuplicatesUseCase
 import com.gallery.core.domain.usecase.CreateCustomAlbumUseCase
 import com.gallery.core.domain.usecase.CreateUserAlbumGroupUseCase
 import com.gallery.core.domain.usecase.DeleteCustomAlbumUseCase
@@ -175,8 +181,12 @@ class GalleryViewModel @Inject constructor(
     private val moveMediaToAlbumUseCase: MoveMediaToAlbumUseCase,
     getDefaultGridColumnsUseCase: GetDefaultGridColumnsUseCase,
     private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase,
-    private val appUpdateRepository: AppUpdateRepository
+    private val appUpdateRepository: AppUpdateRepository,
+    private val analyzeDuplicatesUseCase: AnalyzeDuplicatesUseCase
 ) : ViewModel() {
+
+    private val _duplicateScanState = MutableStateFlow(GalleryDuplicateScanUiState())
+    val duplicateScanState: StateFlow<GalleryDuplicateScanUiState> = _duplicateScanState.asStateFlow()
 
     private val _uiState = MutableStateFlow(GalleryUiState())
     val uiState: StateFlow<GalleryUiState> = _uiState.asStateFlow()
@@ -1350,4 +1360,243 @@ class GalleryViewModel @Inject constructor(
             MediaGroup(dateLabel = label, items = items)
         }
     }
+
+    // ── Duplicate & Name Collision Analyzer ─────────────────────────────────
+
+    fun startDuplicateScan() {
+        val items = _uiState.value.allMedia
+        _duplicateScanState.update {
+            it.copy(
+                isScanning = true,
+                scannedCount = 0,
+                totalCount = items.size,
+                result = null
+            )
+        }
+        viewModelScope.launch {
+            val result = analyzeDuplicatesUseCase.execute(
+                items = items,
+                idSelector = { it.id.toString() },
+                nameSelector = { it.name },
+                isVideoSelector = { it is MediaItem.Video },
+                sizeBytesSelector = { it.size },
+                albumOrFolderNameSelector = { it.bucketName },
+                dateAddedSelector = { it.dateAdded },
+                openInputStream = { item -> mediaRepository.openInputStream(item) },
+                onProgress = { scanned, total ->
+                    _duplicateScanState.update { current ->
+                        current.copy(scannedCount = scanned, totalCount = total)
+                    }
+                }
+            )
+            _duplicateScanState.update {
+                it.copy(
+                    isScanning = false,
+                    scannedCount = items.size,
+                    totalCount = items.size,
+                    result = result
+                )
+            }
+        }
+    }
+
+    fun deleteDuplicateGalleryItem(item: MediaItem) {
+        viewModelScope.launch {
+            val mimeType = when (item) {
+                is MediaItem.Photo -> item.mimeType
+                is MediaItem.Video -> "video/*"
+            }
+            moveToRecycleBinUseCase(
+                sourceUri = item.uri,
+                originalName = item.name,
+                mimeType = mimeType,
+                isVideo = item is MediaItem.Video,
+                mediaId = item.id,
+                bucketName = item.bucketName,
+                dateAdded = item.dateAdded
+            )
+            removeItemFromDuplicateResult(item.id.toString())
+        }
+    }
+
+    fun deleteAllDuplicatesInGalleryGroup(group: DuplicateGroup<MediaItem>) {
+        viewModelScope.launch {
+            val toDelete = group.candidates.filter { !it.isRecommendedKeep }
+            for (candidate in toDelete) {
+                val item = candidate.item
+                val mimeType = when (item) {
+                    is MediaItem.Photo -> item.mimeType
+                    is MediaItem.Video -> "video/*"
+                }
+                moveToRecycleBinUseCase(
+                    sourceUri = item.uri,
+                    originalName = item.name,
+                    mimeType = mimeType,
+                    isVideo = item is MediaItem.Video,
+                    mediaId = item.id,
+                    bucketName = item.bucketName,
+                    dateAdded = item.dateAdded
+                )
+            }
+            val deletedIds = toDelete.map { it.id }.toSet()
+            removeItemsFromDuplicateResult(deletedIds)
+        }
+    }
+
+    fun renameDuplicateGalleryItem(item: MediaItem, newName: String) {
+        viewModelScope.launch {
+            when (val res = mediaRepository.renameMediaItem(item, newName)) {
+                is RenameMediaResult.Success -> {
+                    updateItemNameInDuplicateResult(item.id.toString(), res.newName)
+                }
+                is RenameMediaResult.RequiresPermission -> {
+                    _duplicateScanState.update {
+                        it.copy(
+                            pendingRenameIntentSender = res.intentSender,
+                            pendingRenameItem = res.item,
+                            pendingRenameNewName = res.newName
+                        )
+                    }
+                }
+                is RenameMediaResult.Error -> {
+                    _uiState.update { it.copy(error = res.message) }
+                }
+            }
+        }
+    }
+
+    fun retryPendingDuplicateRename() {
+        val item = _duplicateScanState.value.pendingRenameItem ?: return
+        val newName = _duplicateScanState.value.pendingRenameNewName ?: return
+        clearPendingDuplicateRename()
+        renameDuplicateGalleryItem(item, newName)
+    }
+
+    fun clearPendingDuplicateRename() {
+        _duplicateScanState.update {
+            it.copy(
+                pendingRenameIntentSender = null,
+                pendingRenameItem = null,
+                pendingRenameNewName = null
+            )
+        }
+    }
+
+    private fun removeItemFromDuplicateResult(itemId: String) {
+        _duplicateScanState.update { current ->
+            val currentResult = current.result ?: return@update current
+            val updatedGroups = currentResult.groups.mapNotNull { group ->
+                val remainingCandidates = group.candidates.filter { it.id != itemId }
+                if (remainingCandidates.size < 2) {
+                    null
+                } else {
+                    val hasKeep = remainingCandidates.any { it.isRecommendedKeep }
+                    val adjustedCandidates = if (!hasKeep && group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        remainingCandidates.mapIndexed { index, cand -> cand.copy(isRecommendedKeep = index == 0) }
+                    } else {
+                        remainingCandidates
+                    }
+                    val reclaimable = if (group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        adjustedCandidates.first().sizeBytes * (adjustedCandidates.size - 1)
+                    } else {
+                        0L
+                    }
+                    group.copy(
+                        candidates = adjustedCandidates,
+                        reclaimableBytes = reclaimable
+                    )
+                }
+            }
+            val totalReclaimable = updatedGroups.sumOf { it.reclaimableBytes }
+            current.copy(
+                result = currentResult.copy(
+                    groups = updatedGroups,
+                    totalReclaimableBytes = totalReclaimable
+                )
+            )
+        }
+    }
+
+    private fun removeItemsFromDuplicateResult(itemIds: Set<String>) {
+        _duplicateScanState.update { current ->
+            val currentResult = current.result ?: return@update current
+            val updatedGroups = currentResult.groups.mapNotNull { group ->
+                val remainingCandidates = group.candidates.filter { it.id !in itemIds }
+                if (remainingCandidates.size < 2) {
+                    null
+                } else {
+                    val hasKeep = remainingCandidates.any { it.isRecommendedKeep }
+                    val adjustedCandidates = if (!hasKeep && group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        remainingCandidates.mapIndexed { index, cand -> cand.copy(isRecommendedKeep = index == 0) }
+                    } else {
+                        remainingCandidates
+                    }
+                    val reclaimable = if (group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        adjustedCandidates.first().sizeBytes * (adjustedCandidates.size - 1)
+                    } else {
+                        0L
+                    }
+                    group.copy(
+                        candidates = adjustedCandidates,
+                        reclaimableBytes = reclaimable
+                    )
+                }
+            }
+            val totalReclaimable = updatedGroups.sumOf { it.reclaimableBytes }
+            current.copy(
+                result = currentResult.copy(
+                    groups = updatedGroups,
+                    totalReclaimableBytes = totalReclaimable
+                )
+            )
+        }
+    }
+
+    private fun updateItemNameInDuplicateResult(itemId: String, newName: String) {
+        _duplicateScanState.update { current ->
+            val currentResult = current.result ?: return@update current
+            val updatedGroups = currentResult.groups.mapNotNull { group ->
+                if (group.type == DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                    val cand = group.candidates.find { it.id == itemId }
+                    if (cand != null) {
+                        val remainingSameName = group.candidates.filter { it.id != itemId }
+                        if (remainingSameName.size < 2) {
+                            null
+                        } else {
+                            group.copy(candidates = remainingSameName)
+                        }
+                    } else {
+                        group
+                    }
+                } else {
+                    val updatedCandidates = group.candidates.map {
+                        if (it.id == itemId) it.copy(name = newName) else it
+                    }
+                    val normalizedNames = updatedCandidates.map { it.name.trim().lowercase() }.toSet()
+                    val isSameName = normalizedNames.size == 1
+                    group.copy(
+                        type = if (isSameName) DuplicateGroupType.IDENTICAL_SAME_NAME else DuplicateGroupType.IDENTICAL_DIFFERENT_NAME,
+                        candidates = updatedCandidates
+                    )
+                }
+            }
+            val totalReclaimable = updatedGroups.sumOf { it.reclaimableBytes }
+            current.copy(
+                result = currentResult.copy(
+                    groups = updatedGroups,
+                    totalReclaimableBytes = totalReclaimable
+                )
+            )
+        }
+    }
 }
+
+data class GalleryDuplicateScanUiState(
+    val isScanning: Boolean = false,
+    val scannedCount: Int = 0,
+    val totalCount: Int = 0,
+    val result: DuplicateAnalysisResult<MediaItem>? = null,
+    val pendingRenameIntentSender: IntentSender? = null,
+    val pendingRenameItem: MediaItem? = null,
+    val pendingRenameNewName: String? = null
+)

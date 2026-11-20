@@ -8,9 +8,14 @@ import android.os.Build
 import android.provider.MediaStore
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.gallery.core.domain.model.DuplicateAnalysisResult
+import com.gallery.core.domain.model.DuplicateCandidate
+import com.gallery.core.domain.model.DuplicateGroup
+import com.gallery.core.domain.model.DuplicateGroupType
 import com.gallery.core.domain.model.VaultItem
 import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.domain.repository.VaultRepository
+import com.gallery.core.domain.usecase.AnalyzeDuplicatesUseCase
 import com.gallery.core.domain.usecase.GetDefaultGridColumnsUseCase
 import com.gallery.core.domain.usecase.GetVaultItemsUseCase
 import com.gallery.core.domain.usecase.RestoreFromVaultUseCase
@@ -67,6 +72,7 @@ data class VaultUiState(
     val activeViewingFile: File? = null,
     val decryptedFiles: Map<String, File> = emptyMap(),
     val isPreparingViewer: Boolean = false,
+    val isLocked: Boolean = false,
     val selectedItemIds: Set<String> = emptySet()
 ) {
     val isSelectionMode: Boolean get() = selectedItemIds.isNotEmpty()
@@ -89,7 +95,8 @@ class VaultViewModel @Inject constructor(
     private val vaultRepository: VaultRepository,
     val biometricAuthManager: BiometricAuthManager,
     getDefaultGridColumnsUseCase: GetDefaultGridColumnsUseCase,
-    private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase
+    private val setDefaultGridColumnsUseCase: SetDefaultGridColumnsUseCase,
+    private val analyzeDuplicatesUseCase: AnalyzeDuplicatesUseCase
 ) : AndroidViewModel(application) {
 
     companion object {
@@ -100,6 +107,10 @@ class VaultViewModel @Inject constructor(
 
     private val _vaultState = MutableStateFlow(VaultUiState())
     val vaultState: StateFlow<VaultUiState> = _vaultState.asStateFlow()
+
+    private val _vaultDuplicateScanState = MutableStateFlow(VaultDuplicateScanUiState())
+    val vaultDuplicateScanState: StateFlow<VaultDuplicateScanUiState> = _vaultDuplicateScanState.asStateFlow()
+    private var duplicateScanJob: Job? = null
 
     private val _pinState = MutableStateFlow(PinState())
     val pinState: StateFlow<PinState> = _pinState.asStateFlow()
@@ -406,9 +417,11 @@ class VaultViewModel @Inject constructor(
         if (_isLaunchingEditor.value) {
             return
         }
+        clearVaultDuplicateScan()
         _sessionAuthState.value = VaultAuthState.Idle
         _vaultState.update {
             it.copy(
+                isLocked = true,
                 previewBytes = emptyMap(),
                 previewBitmaps = emptyMap(),
                 previewFiles = emptyMap(),
@@ -790,6 +803,196 @@ class VaultViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        clearVaultDuplicateScan()
         purgeSecureTempFiles()
     }
+
+    // ── Duplicate & Same-Name Analyzer ──────────────────────────────────────
+
+    fun startVaultDuplicateScan() {
+        duplicateScanJob?.cancel()
+        val items = _vaultState.value.items
+        _vaultDuplicateScanState.update {
+            it.copy(
+                isScanning = true,
+                scannedCount = 0,
+                totalCount = items.size,
+                result = null
+            )
+        }
+        duplicateScanJob = viewModelScope.launch {
+            val result = analyzeDuplicatesUseCase.execute(
+                items = items,
+                idSelector = { it.id },
+                nameSelector = { it.originalName },
+                isVideoSelector = { it.isVideo },
+                sizeBytesSelector = { it.originalSizeBytes },
+                albumOrFolderNameSelector = { it.albumName },
+                dateAddedSelector = { it.addedAt },
+                computeHash = { item -> vaultRepository.computeVaultItemSha256(item) },
+                onProgress = { scanned, total ->
+                    _vaultDuplicateScanState.update { current ->
+                        current.copy(scannedCount = scanned, totalCount = total)
+                    }
+                }
+            )
+            _vaultDuplicateScanState.update {
+                it.copy(
+                    isScanning = false,
+                    scannedCount = items.size,
+                    totalCount = items.size,
+                    result = result
+                )
+            }
+        }
+    }
+
+    fun deleteDuplicateVaultItem(item: VaultItem) {
+        viewModelScope.launch {
+            vaultRepository.removeFromVault(item)
+            removeItemFromVaultDuplicateResult(item.id)
+        }
+    }
+
+    fun deleteAllDuplicatesInVaultGroup(group: DuplicateGroup<VaultItem>) {
+        viewModelScope.launch {
+            val toDelete = group.candidates.filter { !it.isRecommendedKeep }
+            for (candidate in toDelete) {
+                vaultRepository.removeFromVault(candidate.item)
+            }
+            val idsToDelete = toDelete.map { it.id }.toSet()
+            removeItemsFromVaultDuplicateResult(idsToDelete)
+        }
+    }
+
+    fun renameDuplicateVaultItem(item: VaultItem, newName: String) {
+        viewModelScope.launch {
+            val res = vaultRepository.renameVaultItem(item, newName)
+            res.onSuccess { finalName ->
+                updateItemNameInVaultDuplicateResult(item.id, finalName)
+            }.onFailure { e ->
+                _vaultState.update { it.copy(error = e.message ?: "Failed to rename item") }
+            }
+        }
+    }
+
+    fun clearVaultDuplicateScan() {
+        duplicateScanJob?.cancel()
+        _vaultDuplicateScanState.value = VaultDuplicateScanUiState()
+    }
+
+    private fun removeItemFromVaultDuplicateResult(itemId: String) {
+        _vaultDuplicateScanState.update { current ->
+            val currentResult = current.result ?: return@update current
+            val updatedGroups = currentResult.groups.mapNotNull { group ->
+                val remainingCandidates = group.candidates.filter { it.id != itemId }
+                if (remainingCandidates.size < 2) {
+                    null
+                } else {
+                    val hasKeep = remainingCandidates.any { it.isRecommendedKeep }
+                    val adjustedCandidates = if (!hasKeep && group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        remainingCandidates.mapIndexed { index, cand -> cand.copy(isRecommendedKeep = index == 0) }
+                    } else {
+                        remainingCandidates
+                    }
+                    val reclaimable = if (group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        adjustedCandidates.first().sizeBytes * (adjustedCandidates.size - 1)
+                    } else {
+                        0L
+                    }
+                    group.copy(
+                        candidates = adjustedCandidates,
+                        reclaimableBytes = reclaimable
+                    )
+                }
+            }
+            val totalReclaimable = updatedGroups.sumOf { it.reclaimableBytes }
+            current.copy(
+                result = currentResult.copy(
+                    groups = updatedGroups,
+                    totalReclaimableBytes = totalReclaimable
+                )
+            )
+        }
+    }
+
+    private fun removeItemsFromVaultDuplicateResult(itemIds: Set<String>) {
+        _vaultDuplicateScanState.update { current ->
+            val currentResult = current.result ?: return@update current
+            val updatedGroups = currentResult.groups.mapNotNull { group ->
+                val remainingCandidates = group.candidates.filter { it.id !in itemIds }
+                if (remainingCandidates.size < 2) {
+                    null
+                } else {
+                    val hasKeep = remainingCandidates.any { it.isRecommendedKeep }
+                    val adjustedCandidates = if (!hasKeep && group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        remainingCandidates.mapIndexed { index, cand -> cand.copy(isRecommendedKeep = index == 0) }
+                    } else {
+                        remainingCandidates
+                    }
+                    val reclaimable = if (group.type != DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                        adjustedCandidates.first().sizeBytes * (adjustedCandidates.size - 1)
+                    } else {
+                        0L
+                    }
+                    group.copy(
+                        candidates = adjustedCandidates,
+                        reclaimableBytes = reclaimable
+                    )
+                }
+            }
+            val totalReclaimable = updatedGroups.sumOf { it.reclaimableBytes }
+            current.copy(
+                result = currentResult.copy(
+                    groups = updatedGroups,
+                    totalReclaimableBytes = totalReclaimable
+                )
+            )
+        }
+    }
+
+    private fun updateItemNameInVaultDuplicateResult(itemId: String, newName: String) {
+        _vaultDuplicateScanState.update { current ->
+            val currentResult = current.result ?: return@update current
+            val updatedGroups = currentResult.groups.mapNotNull { group ->
+                if (group.type == DuplicateGroupType.SAME_NAME_DIFFERENT_CONTENT) {
+                    val cand = group.candidates.find { it.id == itemId }
+                    if (cand != null) {
+                        val remainingSameName = group.candidates.filter { it.id != itemId }
+                        if (remainingSameName.size < 2) {
+                            null
+                        } else {
+                            group.copy(candidates = remainingSameName)
+                        }
+                    } else {
+                        group
+                    }
+                } else {
+                    val updatedCandidates = group.candidates.map {
+                        if (it.id == itemId) it.copy(name = newName) else it
+                    }
+                    val normalizedNames = updatedCandidates.map { it.name.trim().lowercase() }.toSet()
+                    val isSameName = normalizedNames.size == 1
+                    group.copy(
+                        type = if (isSameName) DuplicateGroupType.IDENTICAL_SAME_NAME else DuplicateGroupType.IDENTICAL_DIFFERENT_NAME,
+                        candidates = updatedCandidates
+                    )
+                }
+            }
+            val totalReclaimable = updatedGroups.sumOf { it.reclaimableBytes }
+            current.copy(
+                result = currentResult.copy(
+                    groups = updatedGroups,
+                    totalReclaimableBytes = totalReclaimable
+                )
+            )
+        }
+    }
 }
+
+data class VaultDuplicateScanUiState(
+    val isScanning: Boolean = false,
+    val scannedCount: Int = 0,
+    val totalCount: Int = 0,
+    val result: DuplicateAnalysisResult<VaultItem>? = null
+)

@@ -28,6 +28,7 @@ import com.gallery.core.data.db.VaultDao
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.domain.model.MoveAlbumResult
+import com.gallery.core.domain.model.RenameMediaResult
 import com.gallery.core.domain.model.UserAlbumGroup
 import com.gallery.core.domain.model.resolveFirstCoverUri
 import com.gallery.core.domain.repository.MediaRepository
@@ -54,6 +55,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.InputStream
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -1056,4 +1058,96 @@ class MediaRepositoryImpl @Inject constructor(
             }
         }
     }
+
+    override suspend fun openInputStream(item: MediaItem): InputStream? = withContext(Dispatchers.IO) {
+        try {
+            context.contentResolver.openInputStream(item.uri)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    override suspend fun renameMediaItem(item: MediaItem, newName: String): RenameMediaResult =
+        withContext(Dispatchers.IO) {
+            val originalExt = item.name.substringAfterLast('.', "")
+            var finalName = newName.trim()
+            if (originalExt.isNotBlank() && !finalName.endsWith(".$originalExt", ignoreCase = true)) {
+                finalName = "$finalName.$originalExt"
+            }
+            finalName = finalName.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+            if (finalName.isBlank()) {
+                return@withContext RenameMediaResult.Error("Invalid filename")
+            }
+
+            try {
+                // Reject if another item in the same folder already has the exact target filename
+                val collectionUri = if (item is MediaItem.Video) {
+                    MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                } else {
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
+                val projection = arrayOf(MediaStore.MediaColumns._ID)
+                val selection = "${MediaStore.MediaColumns.BUCKET_ID} = ? AND ${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns._ID} != ?"
+                val selectionArgs = arrayOf(item.bucketId.toString(), finalName, item.id.toString())
+                val existsInFolder = try {
+                    context.contentResolver.query(collectionUri, projection, selection, selectionArgs, null)?.use { cursor ->
+                        cursor.count > 0
+                    } ?: false
+                } catch (_: Exception) { false }
+
+                if (existsInFolder) {
+                    return@withContext RenameMediaResult.Error("An item named '$finalName' already exists in this folder")
+                }
+
+                // If physical file can be renamed directly (API < 29 or MANAGE_EXTERNAL_STORAGE)
+                val filePath = item.filePath ?: queryDataPath(item.uri)
+                if (filePath != null) {
+                    val physicalFile = File(filePath)
+                    val targetFile = File(physicalFile.parentFile, finalName)
+                    if (targetFile.exists() && targetFile.absolutePath != physicalFile.absolutePath) {
+                        return@withContext RenameMediaResult.Error("A file named '$finalName' already exists in this folder")
+                    }
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager())) {
+                        if (physicalFile.exists()) {
+                            physicalFile.renameTo(targetFile)
+                            MediaScannerConnection.scanFile(
+                                context,
+                                arrayOf(physicalFile.absolutePath, targetFile.absolutePath),
+                                null,
+                                null
+                            )
+                        }
+                    }
+                }
+
+                // Update MediaStore.MediaColumns.DISPLAY_NAME
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, finalName)
+                }
+                val updatedRows = context.contentResolver.update(item.uri, values, null, null)
+                if (updatedRows > 0) {
+                    context.contentResolver.notifyChange(item.uri, null)
+                    RenameMediaResult.Success(finalName)
+                } else {
+                    RenameMediaResult.Error("Failed to update media name in system database")
+                }
+            } catch (e: SecurityException) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    try {
+                        val intentSender = MediaStore.createWriteRequest(context.contentResolver, listOf(item.uri)).intentSender
+                        RenameMediaResult.RequiresPermission(intentSender, item, finalName)
+                    } catch (ex: Exception) {
+                        RenameMediaResult.Error("Permission required to rename: ${e.message}")
+                    }
+                } else if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q && e is RecoverableSecurityException) {
+                    val intentSender = e.userAction.actionIntent.intentSender
+                    RenameMediaResult.RequiresPermission(intentSender, item, finalName)
+                } else {
+                    RenameMediaResult.Error(e.message ?: "Permission denied to rename file")
+                }
+            } catch (e: Exception) {
+                RenameMediaResult.Error(e.message ?: "Unexpected error during rename")
+            }
+        }
 }

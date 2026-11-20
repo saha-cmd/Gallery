@@ -91,6 +91,7 @@ import coil.size.Precision
 import coil.size.Scale
 import com.gallery.core.domain.model.VaultItem
 import com.gallery.core.ui.components.AnimatedPinchGridContainer
+import com.gallery.core.ui.components.DuplicateAnalyzerSheet
 import com.gallery.core.ui.components.EmptyStateView
 import com.gallery.core.ui.components.GridScrollPosition
 import com.gallery.core.ui.components.SwipeToDismissBox
@@ -118,6 +119,7 @@ fun VaultScreen(
 ) {
     val vaultState by viewModel.vaultState.collectAsStateWithLifecycle()
     val authState by viewModel.authState.collectAsStateWithLifecycle()
+    val vaultDuplicateScanState by viewModel.vaultDuplicateScanState.collectAsStateWithLifecycle()
     val gridColumns by viewModel.gridColumns.collectAsStateWithLifecycle()
     val view = LocalView.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -127,6 +129,7 @@ fun VaultScreen(
     var showVaultMenu by remember { mutableStateOf(false) }
     var showChangePinDialog by remember { mutableStateOf(false) }
     var showBiometricInfoDialog by remember { mutableStateOf(false) }
+    var showDuplicateAnalyzerSheet by remember { mutableStateOf(false) }
 
     // Auto-lock vault on background or when auth state resets to idle/unauthenticated
     LaunchedEffect(authState) {
@@ -253,6 +256,14 @@ fun VaultScreen(
                             }
                         },
                         actions = {
+                            if (!vaultState.isLocked && !vaultState.isSelectionMode) {
+                                IconButton(onClick = {
+                                    viewModel.startVaultDuplicateScan()
+                                    showDuplicateAnalyzerSheet = true
+                                }) {
+                                    Icon(Icons.Outlined.ContentCopy, contentDescription = "Find Duplicates")
+                                }
+                            }
                             Box {
                                 IconButton(onClick = { showVaultMenu = true }) {
                                     Icon(Icons.Outlined.MoreVert, "Options")
@@ -263,6 +274,15 @@ fun VaultScreen(
                                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f))
                                 ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Find Duplicates") },
+                                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
+                                        onClick = {
+                                            showVaultMenu = false
+                                            viewModel.startVaultDuplicateScan()
+                                            showDuplicateAnalyzerSheet = true
+                                        }
+                                    )
                                     DropdownMenuItem(
                                         text = { Text("Change PIN") },
                                         leadingIcon = { Icon(Icons.Outlined.Pin, null) },
@@ -786,6 +806,91 @@ fun VaultScreen(
             confirmButton = {
                 TextButton(onClick = { showBiometricInfoDialog = false }) {
                     Text("OK")
+                }
+            }
+        )
+    }
+
+    if (showDuplicateAnalyzerSheet) {
+        DuplicateAnalyzerSheet(
+            isScanning = vaultDuplicateScanState.isScanning,
+            scannedCount = vaultDuplicateScanState.scannedCount,
+            totalCount = vaultDuplicateScanState.totalCount,
+            result = vaultDuplicateScanState.result,
+            onDismiss = {
+                showDuplicateAnalyzerSheet = false
+                viewModel.clearVaultDuplicateScan()
+            },
+            onDeleteItem = { item -> viewModel.deleteDuplicateVaultItem(item) },
+            onDeleteAllDuplicatesInGroup = { group -> viewModel.deleteAllDuplicatesInVaultGroup(group) },
+            onRenameItem = { item, newName -> viewModel.renameDuplicateVaultItem(item, newName) },
+            thumbnail = { item: VaultItem, modifier: Modifier ->
+                val context = LocalContext.current
+                val previewBytes = vaultState.previewBytes[item.id]
+                val previewBitmap = vaultState.previewBitmaps[item.id]
+                val previewFile = vaultState.previewFiles[item.id]
+
+                LaunchedEffect(item.id) {
+                    if (previewBytes == null && previewBitmap == null && previewFile == null) {
+                        viewModel.requestPreview(item)
+                    }
+                }
+
+                Box(modifier = modifier, contentAlignment = Alignment.Center) {
+                    if (previewBitmap != null) {
+                        Image(
+                            bitmap = previewBitmap.asImageBitmap(),
+                            contentDescription = item.originalName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else if ((previewBytes != null && previewBytes.isNotEmpty()) || (previewFile != null && previewFile.exists())) {
+                        val thumbRequest = remember(previewBytes, previewFile?.absolutePath, item.id) {
+                            ImageRequest.Builder(context)
+                                .data(previewBytes ?: previewFile)
+                                .size(150, 150)
+                                .precision(Precision.INEXACT)
+                                .scale(Scale.FILL)
+                                .bitmapConfig(Bitmap.Config.RGB_565)
+                                .build()
+                        }
+                        AsyncImage(
+                            model = thumbRequest,
+                            contentDescription = item.originalName,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surfaceVariant),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (item.isVideo) Icons.Outlined.Videocam else Icons.Outlined.Photo,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                    if (item.isVideo) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(4.dp)
+                                .background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = "Video",
+                                tint = Color.White,
+                                modifier = Modifier.size(12.dp)
+                            )
+                        }
+                    }
                 }
             }
         )

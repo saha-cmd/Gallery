@@ -46,4 +46,6 @@ interface VaultRepository {
     suspend fun getThumbnailBytes(vaultItem: VaultItem): ByteArray?
     suspend fun clearCorruptedItems(): Int
     fun canModifyMediaSilently(): Boolean
+    suspend fun renameVaultItem(vaultItem: VaultItem, newName: String): Result<String>
+    suspend fun computeVaultItemSha256(vaultItem: VaultItem): String?
 }

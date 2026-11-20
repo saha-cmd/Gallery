@@ -3,8 +3,10 @@ package com.gallery.core.domain.repository
 import com.gallery.core.domain.model.Album
 import com.gallery.core.domain.model.MediaItem
 import com.gallery.core.domain.model.MoveAlbumResult
+import com.gallery.core.domain.model.RenameMediaResult
 import com.gallery.core.domain.model.UserAlbumGroup
 import kotlinx.coroutines.flow.Flow
+import java.io.InputStream
 
 interface MediaRepository {
     fun getAllMedia(): Flow<List<MediaItem>>
@@ -59,4 +61,8 @@ interface MediaRepository {
         newAlbumName: String?,
         sourceAlbumId: Long? = null
     ): MoveAlbumResult
+
+    // Duplicate Analyzer & Rename Media
+    suspend fun renameMediaItem(item: MediaItem, newName: String): RenameMediaResult
+    suspend fun openInputStream(item: MediaItem): InputStream?
 }

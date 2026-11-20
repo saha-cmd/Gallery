@@ -37,4 +37,10 @@ interface VaultDao {
 
     @Query("SELECT * FROM vault_items WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): VaultItemEntity?
+
+    @Query("UPDATE vault_items SET originalName = :newName WHERE id = :id")
+    suspend fun updateOriginalName(id: String, newName: String)
+
+    @Query("SELECT * FROM vault_items WHERE albumName = :albumName")
+    suspend fun getEntitiesByAlbum(albumName: String): List<VaultItemEntity>
 }

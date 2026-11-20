@@ -967,4 +967,50 @@ class VaultRepositoryImpl @Inject constructor(
             android.util.Log.e("VaultRepo", "Encrypted thumbnail file error", e)
         }
     }
+
+    override suspend fun renameVaultItem(vaultItem: VaultItem, newName: String): Result<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                val originalExt = vaultItem.originalName.substringAfterLast('.', "")
+                var finalName = newName.trim()
+                if (originalExt.isNotBlank() && !finalName.endsWith(".$originalExt", ignoreCase = true)) {
+                    finalName = "$finalName.$originalExt"
+                }
+                finalName = finalName.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+                if (finalName.isBlank()) {
+                    return@withContext Result.failure(IllegalArgumentException("Invalid filename"))
+                }
+
+                // Check for name collision in the same album
+                val sameAlbumEntities = vaultDao.getEntitiesByAlbum(vaultItem.albumName)
+                val collision = sameAlbumEntities.any { it.id != vaultItem.id && it.originalName.equals(finalName, ignoreCase = true) }
+                if (collision) {
+                    return@withContext Result.failure(IllegalStateException("An item named '$finalName' already exists in this album"))
+                }
+
+                vaultDao.updateOriginalName(vaultItem.id, finalName)
+                Result.success(finalName)
+            } catch (e: Exception) {
+                Result.failure(e)
+            }
+        }
+
+    override suspend fun computeVaultItemSha256(vaultItem: VaultItem): String? =
+        withContext(Dispatchers.IO) {
+            try {
+                val encFile = File(vaultItem.encryptedFilePath)
+                if (!encFile.exists() || encFile.length() < 5) return@withContext null
+                val md = MessageDigest.getInstance("SHA-256")
+                val nullStream = object : java.io.OutputStream() {
+                    override fun write(b: Int) {}
+                    override fun write(b: ByteArray, off: Int, len: Int) {}
+                }
+                java.security.DigestOutputStream(nullStream, md).use { digestOut ->
+                    cryptoManager.decryptToStream(vaultItem.encryptedFilePath, vaultItem.iv, digestOut)
+                }
+                md.digest().joinToString("") { "%02x".format(it) }
+            } catch (e: Exception) {
+                null
+            }
+        }
 }
